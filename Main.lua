@@ -1,13 +1,15 @@
 -- Main.lua (Executor entry point)
--- Drop all three files into the same folder in your executor workspace,
--- then execute this file. Adjust FOLDER if your path differs.
+-- Loads Controller and Interface directly from GitHub — no local files needed.
+-- Replace BASE_URL with your own repo's raw base path.
 
-local FOLDER = "FlightProject/"   -- trailing slash, or "" if files are at workspace root
+local BASE_URL = "https://raw.githubusercontent.com/VeloCruel/Dev-Roblox/main/"
 
 local function loadModule(name)
-    local path = FOLDER .. name .. ".lua"
-    assert(isfile(path), "[FlightSystem] File not found: " .. path)
-    return loadstring(readfile(path))()
+    local url  = BASE_URL .. name .. ".lua"
+    local src  = game:HttpGet(url)
+    local fn, err = loadstring(src)
+    assert(fn, "[FlightSystem] Failed to parse " .. name .. ": " .. tostring(err))
+    return fn()
 end
 
 local Players          = game:GetService("Players")
