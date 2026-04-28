@@ -1,36 +1,34 @@
 -- Animator.lua
--- Plays animations on the local character at Action4 priority.
--- Animator:LoadAnimation from a LocalScript replicates to all clients.
+-- Two-pronged animation replacement so changes are immediate and persistent:
+--   1. Stops every currently-playing track (clears the slate).
+--   2. Patches the character's Animate LocalScript so idle/walk/run
+--      all use the selected animation — this is what makes it replicate.
+--   3. Plays an Action4-priority track directly for instant visual effect.
 
 local Animator = {}
 Animator.__index = Animator
 
--- Idle animation IDs from famous Roblox animation packages
 Animator.PRESETS = {
-	{ name = "None",        id = nil            },
-	{ name = "TOY",         id = "782841498"    },
-	{ name = "Robot",       id = "313382498"    },
-	{ name = "Ninja",       id = "656118852"    },
-	{ name = "Superhero",   id = "616072382"    },
-	{ name = "Zombie",      id = "616163890"    },
-	{ name = "Astronaut",   id = "891836989"    },
-	{ name = "Mage",        id = "707855543"    },
-	{ name = "Knight",      id = "657564596"    },
-	{ name = "Pirate",      id = "750711522"    },
-	{ name = "Werewolf",    id = "1083216690"   },
+	{ name = "None",      id = nil           },
+	{ name = "TOY",       id = "782841498"   },
+	{ name = "Robot",     id = "313382498"   },
+	{ name = "Ninja",     id = "656118852"   },
+	{ name = "Superhero", id = "616072382"   },
+	{ name = "Zombie",    id = "616163890"   },
+	{ name = "Astronaut", id = "891836989"   },
+	{ name = "Mage",      id = "707855543"   },
+	{ name = "Knight",    id = "657564596"   },
+	{ name = "Pirate",    id = "750711522"   },
+	{ name = "Werewolf",  id = "1083216690"  },
 }
 
--- Returns a flat list of preset names for Rayfield dropdown
 function Animator.presetNames()
-	local names = {}
-	for _, p in ipairs(Animator.PRESETS) do
-		names[#names + 1] = p.name
-	end
-	return names
+	local t = {}
+	for _, p in ipairs(Animator.PRESETS) do t[#t + 1] = p.name end
+	return t
 end
 
--- Extracts the numeric asset ID from any format:
---   "782841498", "rbxassetid://782841498", "http://...782841498", etc.
+-- Accepts: "782841498", "rbxassetid://782841498", any URL containing digits
 local function parseId(raw)
 	if not raw or raw == "" then return nil end
 	local n = tostring(raw):match("%d+")
@@ -38,36 +36,74 @@ local function parseId(raw)
 end
 
 function Animator.new()
-	return setmetatable({ _track = nil, _anim = nil, _currentId = nil }, Animator)
+	return setmetatable({
+		_track     = nil,
+		_anim      = nil,
+		_currentId = nil,
+		_originals = {},   -- original AnimationId values keyed by Animation instance
+	}, Animator)
 end
+
+-- ── Animate LocalScript patching ──────────────────────────────────────────────
+
+function Animator:_patch(character, assetId)
+	local animScript = character:FindFirstChild("Animate")
+	if not animScript then return end
+
+	for _, desc in ipairs(animScript:GetDescendants()) do
+		if desc:IsA("Animation") then
+			-- Save original only once per instance
+			if not self._originals[desc] then
+				self._originals[desc] = desc.AnimationId
+			end
+			desc.AnimationId = assetId
+		end
+	end
+end
+
+function Animator:_restore()
+	for desc, id in pairs(self._originals) do
+		-- Guard against instances that no longer exist after respawn
+		local ok = pcall(function() desc.AnimationId = id end)
+		if not ok then self._originals[desc] = nil end
+	end
+	self._originals = {}
+end
+
+-- ── Public API ────────────────────────────────────────────────────────────────
 
 function Animator:play(character, rawId)
 	self:stop()
 
 	local assetId = parseId(rawId)
-	if not assetId then return end
-
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then return end
-	local animatorObj = humanoid:FindFirstChildOfClass("Animator")
-	if not animatorObj then return end
-
-	local anim = Instance.new("Animation")
-	anim.AnimationId = assetId
-
-	local ok, track = pcall(function()
-		return animatorObj:LoadAnimation(anim)
-	end)
-
-	if not ok or not track then
-		warn("[Animator] Failed to load animation:", rawId, track)
-		anim:Destroy()
+	if not assetId then
+		warn("[Animator] Invalid ID:", tostring(rawId))
 		return
 	end
 
+	local humanoid    = character:FindFirstChildOfClass("Humanoid")
+	local animatorObj = humanoid and humanoid:FindFirstChildOfClass("Animator")
+	if not animatorObj then
+		warn("[Animator] No Animator found on character")
+		return
+	end
+
+	-- 1. Kill every currently-playing track with no fade delay
+	for _, t in ipairs(animatorObj:GetPlayingAnimationTracks()) do
+		t:Stop(0)
+	end
+
+	-- 2. Patch Animate LocalScript so the animation persists in all movement states
+	self:_patch(character, assetId)
+
+	-- 3. Play a direct Action4 track for immediate replication to other clients
+	local anim = Instance.new("Animation")
+	anim.AnimationId = assetId
+
+	local track = animatorObj:LoadAnimation(anim)
 	track.Priority = Enum.AnimationPriority.Action4
 	track.Looped   = true
-	track:Play()
+	track:Play(0)   -- 0 = instant start, no crossfade
 
 	self._track     = track
 	self._anim      = anim
@@ -76,7 +112,7 @@ end
 
 function Animator:stop()
 	if self._track then
-		self._track:Stop()
+		self._track:Stop(0)
 		self._track:Destroy()
 		self._track = nil
 	end
@@ -85,12 +121,15 @@ function Animator:stop()
 		self._anim = nil
 	end
 	self._currentId = nil
+	self:_restore()
 end
 
--- Replays the current animation on a new character (used after respawn)
 function Animator:replayOn(character)
 	if self._currentId then
-		self:play(character, self._currentId)
+		local id = self._currentId
+		self._currentId = nil   -- clear so stop() doesn't try to restore stale refs
+		self._originals = {}
+		self:play(character, id)
 	end
 end
 
