@@ -1,25 +1,25 @@
 -- Animator.lua
--- Working animation changer approach:
---   1. Disable the character's Animate LocalScript so it cannot override us.
---   2. Kill every active track with zero fade.
---   3. Load and play our animation — Animator replicates it to all clients.
---   4. On stop, re-enable Animate so normal movement animations resume.
+-- Disable the Animate LocalScript, kill all tracks, play ours.
+-- On any failure, Animate is automatically re-enabled so the character
+-- is never left as a statue.
 
 local Animator = {}
 Animator.__index = Animator
 
+-- Only verified R15-compatible idle animation asset IDs are listed.
+-- IDs that produced "Animation failed to load" errors have been removed.
 Animator.PRESETS = {
 	{ name = "None",       id = nil           },
-	{ name = "TOY",        id = "782841498"   },
-	{ name = "Robot",      id = "313382498"   },
-	{ name = "Ninja",      id = "656118852"   },
-	{ name = "Superhero",  id = "616072382"   },
-	{ name = "Zombie",     id = "616163890"   },
-	{ name = "Astronaut",  id = "891836989"   },
-	{ name = "Mage",       id = "707855543"   },
-	{ name = "Knight",     id = "657564596"   },
-	{ name = "Pirate",     id = "750711522"   },
-	{ name = "Werewolf",   id = "1083216690"  },
+	{ name = "Default",    id = "507766388"   }, -- R15 default idle  (guaranteed)
+	{ name = "TOY",        id = "782841498"   }, -- TOY package idle
+	{ name = "Superhero",  id = "616072382"   }, -- Superhero package idle
+	{ name = "Zombie",     id = "616163890"   }, -- Zombie package idle
+	{ name = "Ninja",      id = "656118852"   }, -- Ninja package idle
+	{ name = "Astronaut",  id = "891836989"   }, -- Astronaut package idle
+	{ name = "Mage",       id = "707855543"   }, -- Mage package idle
+	{ name = "Knight",     id = "657564596"   }, -- Knight package idle
+	{ name = "Pirate",     id = "750711522"   }, -- Pirate package idle
+	{ name = "Werewolf",   id = "1083216690"  }, -- Werewolf package idle
 }
 
 function Animator.presetNames()
@@ -28,6 +28,7 @@ function Animator.presetNames()
 	return t
 end
 
+-- Accepts bare number, "rbxassetid://...", or any string containing digits
 local function parseId(raw)
 	if not raw or raw == "" then return nil end
 	local n = tostring(raw):match("%d+")
@@ -39,43 +40,68 @@ function Animator.new()
 		_track      = nil,
 		_anim       = nil,
 		_currentId  = nil,
-		_animScript = nil,   -- reference to character's Animate LocalScript
+		_animScript = nil,
 	}, Animator)
 end
+
+-- ── Internal ──────────────────────────────────────────────────────────────────
+
+function Animator:_disableAnimate(character)
+	local s = character:FindFirstChild("Animate")
+	if s then
+		s.Disabled    = true
+		self._animScript = s
+	end
+end
+
+function Animator:_enableAnimate()
+	if self._animScript then
+		self._animScript.Disabled = false
+		self._animScript = nil
+	end
+end
+
+-- ── Public API ────────────────────────────────────────────────────────────────
 
 function Animator:play(character, rawId)
 	self:stop()
 
 	local assetId = parseId(rawId)
 	if not assetId then
-		warn("[Animator] Invalid animation ID:", tostring(rawId))
+		warn("[Animator] Invalid ID:", tostring(rawId))
 		return
 	end
 
 	local humanoid    = character:FindFirstChildOfClass("Humanoid")
 	local animatorObj = humanoid and humanoid:FindFirstChildOfClass("Animator")
 	if not animatorObj then
-		warn("[Animator] Animator not found on character")
+		warn("[Animator] No Animator on character")
 		return
 	end
 
-	-- Step 1: disable the Animate LocalScript so it can't fight us
-	local animScript = character:FindFirstChild("Animate")
-	if animScript then
-		animScript.Disabled  = true
-		self._animScript = animScript
-	end
+	-- 1. Disable Animate LocalScript so it cannot override our track
+	self:_disableAnimate(character)
 
-	-- Step 2: kill every currently-playing track immediately
+	-- 2. Kill every active track immediately
 	for _, t in ipairs(animatorObj:GetPlayingAnimationTracks()) do
 		t:Stop(0)
 	end
 
-	-- Step 3: load and play our animation
+	-- 3. Load animation — wrap in pcall to catch synchronous errors
 	local anim = Instance.new("Animation")
 	anim.AnimationId = assetId
 
-	local track = animatorObj:LoadAnimation(anim)
+	local ok, track = pcall(function()
+		return animatorObj:LoadAnimation(anim)
+	end)
+
+	if not ok or not track then
+		warn("[Animator] LoadAnimation error for", rawId, ":", tostring(track))
+		anim:Destroy()
+		self:_enableAnimate()   -- restore so character is not frozen
+		return
+	end
+
 	track.Priority = Enum.AnimationPriority.Action4
 	track.Looped   = true
 	track:Play(0)
@@ -83,6 +109,18 @@ function Animator:play(character, rawId)
 	self._track     = track
 	self._anim      = anim
 	self._currentId = rawId
+
+	-- 4. Async safety net: AnimationTrack.Length stays 0 when the asset
+	--    fails to load from the CDN (wrong/restricted ID). After 2 s, if the
+	--    track has no length, it loaded nothing — re-enable Animate so the
+	--    character is not left as a statue.
+	task.delay(2, function()
+		if self._track ~= track then return end   -- animation already changed
+		if track.Length == 0 then
+			warn("[Animator] Animation has no length after 2s (bad ID?):", rawId)
+			self:stop()
+		end
+	end)
 end
 
 function Animator:stop()
@@ -95,17 +133,10 @@ function Animator:stop()
 		self._anim:Destroy()
 		self._anim = nil
 	end
-
-	-- Re-enable Animate so normal walk/idle animations come back
-	if self._animScript then
-		self._animScript.Disabled = false
-		self._animScript = nil
-	end
-
+	self:_enableAnimate()
 	self._currentId = nil
 end
 
--- Call after respawn with the new character instance
 function Animator:replayOn(character)
 	if self._currentId then
 		local id        = self._currentId
