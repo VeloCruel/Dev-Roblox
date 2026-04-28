@@ -72,9 +72,11 @@ function Interface.new(callbacks)
 		CurrentOption   = { "None" },
 		MultipleOptions = false,
 		Flag            = "AnimPreset",
+		-- Rayfield sends a string on some versions, a table on others
 		Callback        = function(option)
+			local name = type(option) == "table" and option[1] or option
 			if callbacks and callbacks.onAnimPreset then
-				callbacks.onAnimPreset(option)
+				callbacks.onAnimPreset(name)
 			end
 		end,
 	})
