@@ -107,9 +107,16 @@ function Controller:enable(character)
 		smoothVelocity       = smoothVelocity:Lerp(target, t)
 		self._lv.VectorVelocity = smoothVelocity
 
-		-- Face movement direction (horizontal only, no tilt)
+		-- Face movement direction with 45-degree forward tilt when moving,
+		-- return to upright while hovering.
 		if horizontal.Magnitude > 0.5 then
-			self._ao.CFrame = CFrame.lookAt(root.Position, root.Position + horizontal.Unit)
+			local lookGoal = CFrame.lookAt(root.Position, root.Position + horizontal.Unit)
+			self._ao.CFrame = lookGoal * CFrame.Angles(math.rad(45), 0, 0)
+		else
+			local flatLook = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+			if flatLook.Magnitude > 0.01 then
+				self._ao.CFrame = CFrame.lookAt(root.Position, root.Position + flatLook.Unit)
+			end
 		end
 
 		self.speed = smoothVelocity.Magnitude
