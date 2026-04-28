@@ -1,24 +1,25 @@
--- Main.lua (LocalScript)
--- Entry point: wires UserInputService keybinds to Controller + Interface.
--- Place this LocalScript inside StarterPlayerScripts (or StarterCharacterScripts).
--- Controller.lua and Interface.lua must be siblings of this script.
+-- Main.lua (Executor entry point)
+-- Drop all three files into the same folder in your executor workspace,
+-- then execute this file. Adjust FOLDER if your path differs.
 
-local Players         = game:GetService("Players")
+local FOLDER = "FlightProject/"   -- trailing slash, or "" if files are at workspace root
+
+local function loadModule(name)
+    local path = FOLDER .. name .. ".lua"
+    assert(isfile(path), "[FlightSystem] File not found: " .. path)
+    return loadstring(readfile(path))()
+end
+
+local Players          = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local RunService      = game:GetService("RunService")
+local RunService       = game:GetService("RunService")
 
-local Controller = require(script.Parent.Controller)
-local Interface  = require(script.Parent.Interface)
+local Controller = loadModule("Controller")
+local Interface  = loadModule("Interface")
 
 local player     = Players.LocalPlayer
 local controller = Controller.new()
 local interface  = Interface.new()
-
--- ── Helpers ───────────────────────────────────────────────────────────────────
-
-local function getCharacter()
-	return player.Character
-end
 
 -- ── Toggle flight: F ──────────────────────────────────────────────────────────
 
@@ -26,7 +27,7 @@ UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then return end
 	if input.KeyCode ~= Enum.KeyCode.F then return end
 
-	local character = getCharacter()
+	local character = player.Character
 	if not character then return end
 
 	if controller:isActive() then
@@ -62,21 +63,17 @@ RunService.Heartbeat:Connect(function()
 		return
 	end
 
-	local isDown = UserInputService.IsKeyDown
-
-	-- Horizontal (camera-relative, fed as local X/Z)
 	local inputVec = Vector3.new(
-		(isDown(UserInputService, Enum.KeyCode.D) and 1 or 0)
-		- (isDown(UserInputService, Enum.KeyCode.A) and 1 or 0),
+		(UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0)
+		- (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0),
 		0,
-		(isDown(UserInputService, Enum.KeyCode.S) and 1 or 0)
-		- (isDown(UserInputService, Enum.KeyCode.W) and 1 or 0)
+		(UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
+		- (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0)
 	)
 
-	-- Vertical (world Y)
 	local vertInput =
-		(isDown(UserInputService, Enum.KeyCode.Space)       and 1 or 0)
-		- (isDown(UserInputService, Enum.KeyCode.LeftControl) and 1 or 0)
+		(UserInputService:IsKeyDown(Enum.KeyCode.Space)        and 1 or 0)
+		- (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) and 1 or 0)
 
 	controller:setInput(inputVec, vertInput)
 	interface:update(true, controller:getSpeed(), controller.boosting)
