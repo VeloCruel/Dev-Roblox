@@ -18,22 +18,86 @@ local Controller = loadModule("Controller")
 local Animator   = loadModule("Animator")
 local Interface  = loadModule("Interface")
 
-local player     = Players.LocalPlayer
+local player = Players.LocalPlayer
+
+-- ── Flight controller ─────────────────────────────────────────────────────────
+
 local controller = Controller.new()
-local animator   = Animator.new()
 
--- name → bundleId  (nil for "None")
-local presetMap = {}
-for _, p in ipairs(Animator.PRESETS) do
-    presetMap[p.name] = p.bundleId
-end
+-- ── Animation module ──────────────────────────────────────────────────────────
+-- Self-contained: owns the Animator instance, preset map, display name, and
+-- the bundle ID that survives stop() so respawns replay the last choice.
 
--- Track what is currently playing for HUD display and respawn replay
-local currentAnimName   = "None"
-local lastBundleId      = nil   -- survives stop(), used for respawn replay
+local AnimModule = (function()
+    local animator = Animator.new()
+
+    -- Build name → bundleId lookup from the preset list
+    local presetMap = {}
+    for _, p in ipairs(Animator.PRESETS) do
+        presetMap[p.name] = p.bundleId  -- nil entry for "None" is intentional
+    end
+
+    local currentName  = "None"
+    local lastBundleId = nil   -- persists across stop() for respawn replay
+
+    local M = {}
+
+    -- Apply a named preset ("None" stops the current animation).
+    function M.applyPreset(name, character)
+        if not character then return end
+
+        local bundleId = presetMap[name]
+        if bundleId then
+            animator:applyBundle(character, bundleId)
+            lastBundleId = bundleId
+            currentName  = name
+        else
+            animator:stop()
+            lastBundleId = nil
+            currentName  = "None"
+        end
+    end
+
+    -- Apply a raw animation ID entered by the user.
+    function M.applyCustom(rawId, character)
+        if not character then return end
+        animator:play(character, rawId)
+        lastBundleId = nil
+        currentName  = "Custom"
+    end
+
+    -- Stop the animation and clear selection.
+    function M.reset()
+        animator:stop()
+        lastBundleId = nil
+        currentName  = "None"
+    end
+
+    -- Stop animation on character removal (Animate script on old char is gone
+    -- anyway, but this keeps animator state clean).
+    function M.onCharacterRemoving(character)
+        animator:stop()
+    end
+
+    -- Replay the last chosen bundle after respawn.
+    function M.onCharacterAdded(character)
+        character:WaitForChild("HumanoidRootPart")
+        character:WaitForChild("Humanoid")
+        if lastBundleId then
+            animator:applyBundle(character, lastBundleId)
+        end
+    end
+
+    function M.currentName() return currentName end
+    function M.presetNames() return Animator.presetNames() end
+
+    return M
+end)()
+
+-- ── Interface ─────────────────────────────────────────────────────────────────
 
 local interface = Interface.new({
-    presetNames = Animator.presetNames(),
+    presetNames = AnimModule.presetNames(),
 
     onFlightToggle = function(val)
         local character = player.Character
@@ -46,34 +110,16 @@ local interface = Interface.new({
     end,
 
     onAnimPreset = function(option)
-        local name      = type(option) == "table" and option[1] or option
-        local bundleId  = presetMap[name]
-        local character = player.Character
-        if not character then return end
-
-        if bundleId then
-            animator:applyBundle(character, bundleId)
-            lastBundleId    = bundleId
-            currentAnimName = name
-        else
-            animator:stop()
-            lastBundleId    = nil
-            currentAnimName = "None"
-        end
+        local name = type(option) == "table" and option[1] or option
+        AnimModule.applyPreset(name, player.Character)
     end,
 
     onAnimCustom = function(rawId)
-        local character = player.Character
-        if not character then return end
-        animator:play(character, rawId)
-        lastBundleId    = nil
-        currentAnimName = "Custom"
+        AnimModule.applyCustom(rawId, player.Character)
     end,
 
     onAnimReset = function()
-        animator:stop()
-        lastBundleId    = nil
-        currentAnimName = "None"
+        AnimModule.reset()
     end,
 })
 
@@ -113,7 +159,7 @@ RunService.Heartbeat:Connect(function()
     local boosting = controller.boosting
 
     if not flying then
-        interface:update(false, 0, false, currentAnimName)
+        interface:update(false, 0, false, AnimModule.currentName())
         return
     end
 
@@ -130,21 +176,16 @@ RunService.Heartbeat:Connect(function()
         - (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) and 1 or 0)
 
     controller:setInput(inputVec, vertInput)
-    interface:update(true, controller:getSpeed(), boosting, currentAnimName)
+    interface:update(true, controller:getSpeed(), boosting, AnimModule.currentName())
 end)
 
 -- ── Respawn handling ──────────────────────────────────────────────────────────
 
 player.CharacterRemoving:Connect(function(character)
     controller:disable(character)
-    animator:stop()
+    AnimModule.onCharacterRemoving(character)
 end)
 
 player.CharacterAdded:Connect(function(character)
-    character:WaitForChild("HumanoidRootPart")
-    character:WaitForChild("Humanoid")
-    -- Replay last selected bundle after respawn
-    if lastBundleId then
-        animator:applyBundle(character, lastBundleId)
-    end
+    AnimModule.onCharacterAdded(character)
 end)
