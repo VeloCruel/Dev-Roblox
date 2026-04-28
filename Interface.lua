@@ -1,5 +1,10 @@
 -- Interface.lua — Rayfield UI
--- Interface.new(callbacks) where callbacks = { onFlightToggle(bool), onBoostToggle(bool) }
+-- Interface.new(callbacks)
+--   callbacks.onFlightToggle(bool)
+--   callbacks.onBoostToggle(bool)
+--   callbacks.onAnimPreset(presetName)
+--   callbacks.onAnimCustom(rawId)
+--   callbacks.onAnimReset()
 
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
@@ -10,7 +15,8 @@ function Interface.new(callbacks)
 	local self      = setmetatable({}, Interface)
 	self._lastState = nil
 	self._lastSpeed = -1
-	self._syncing   = false   -- guard against callback loops when we set toggles
+	self._syncing   = false
+	self._customId  = ""
 
 	self._win = Rayfield:CreateWindow({
 		Name                   = "Flight System",
@@ -26,7 +32,7 @@ function Interface.new(callbacks)
 	-- ── Controls tab ──────────────────────────────────────────────────────────
 
 	local ctrlTab = self._win:CreateTab("Controls", 4483362458)
-	ctrlTab:CreateSection("Toggles")
+	ctrlTab:CreateSection("Flight Toggles")
 
 	self._flightToggle = ctrlTab:CreateToggle({
 		Name         = "Enable Flight  [F]",
@@ -52,6 +58,60 @@ function Interface.new(callbacks)
 		end,
 	})
 
+	-- ── Animations tab ────────────────────────────────────────────────────────
+
+	local animTab = self._win:CreateTab("Animations", 4483362458)
+
+	animTab:CreateSection("Presets")
+
+	local presetNames = callbacks and callbacks.presetNames or { "None" }
+
+	animTab:CreateDropdown({
+		Name            = "Select Animation",
+		Options         = presetNames,
+		CurrentOption   = { "None" },
+		MultipleOptions = false,
+		Flag            = "AnimPreset",
+		Callback        = function(option)
+			if callbacks and callbacks.onAnimPreset then
+				callbacks.onAnimPreset(option)
+			end
+		end,
+	})
+
+	animTab:CreateButton({
+		Name     = "Reset / Stop Animation",
+		Callback = function()
+			if callbacks and callbacks.onAnimReset then
+				callbacks.onAnimReset()
+			end
+		end,
+	})
+
+	animTab:CreateSection("Custom Animation")
+
+	animTab:CreateInput({
+		Name                    = "Animation ID",
+		CurrentValue            = "",
+		PlaceholderText         = "e.g. 782841498",
+		RemoveTextAfterFocusLost = false,
+		Flag                    = "CustomAnimID",
+		Callback                = function(text)
+			self._customId = text  -- store; apply on button press
+		end,
+	})
+
+	animTab:CreateButton({
+		Name     = "Apply Custom Animation",
+		Callback = function()
+			if self._customId and self._customId ~= "" then
+				if callbacks and callbacks.onAnimCustom then
+					callbacks.onAnimCustom(self._customId)
+				end
+			end
+		end,
+	})
+
 	-- ── HUD tab ───────────────────────────────────────────────────────────────
 
 	local hudTab = self._win:CreateTab("HUD", 4483362458)
@@ -59,19 +119,20 @@ function Interface.new(callbacks)
 
 	self._statusLabel = hudTab:CreateLabel("FLIGHT   OFF")
 	self._speedLabel  = hudTab:CreateLabel("SPD  0 u/s")
+	self._animLabel   = hudTab:CreateLabel("ANIM  None")
 
 	return self
 end
 
--- Sync Rayfield toggle without re-firing the user callback
+-- Sync a Rayfield toggle without re-firing the callback
 function Interface:_setToggle(toggle, value)
 	if not toggle then return end
 	self._syncing = true
-	toggle:Set(value)
+	pcall(function() toggle:Set(value) end)
 	self._syncing = false
 end
 
-function Interface:update(isFlying, speed, isBoosting)
+function Interface:update(isFlying, speed, isBoosting, animName)
 	local stateKey = tostring(isFlying) .. tostring(isBoosting)
 
 	if stateKey ~= self._lastState then
@@ -85,8 +146,6 @@ function Interface:update(isFlying, speed, isBoosting)
 		end
 
 		self._statusLabel:Set(statusText)
-
-		-- Sync toggles to reflect state changes made via F / Shift keys
 		self:_setToggle(self._flightToggle, isFlying)
 		self:_setToggle(self._boostToggle,  isBoosting)
 
@@ -101,6 +160,10 @@ function Interface:update(isFlying, speed, isBoosting)
 	if rounded ~= self._lastSpeed then
 		self._lastSpeed = rounded
 		self._speedLabel:Set(string.format("SPD  %d u/s", rounded))
+	end
+
+	if animName then
+		self._animLabel:Set("ANIM  " .. tostring(animName))
 	end
 end
 
