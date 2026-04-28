@@ -1,154 +1,206 @@
 -- Animator.lua
--- Disable the Animate LocalScript, kill all tracks, play ours.
--- On any failure, Animate is automatically re-enabled so the character
--- is never left as a statue.
+-- Fetches real animation asset IDs live from the Roblox catalog API
+-- using the bundle ID, patches the character's Animate LocalScript,
+-- then restarts it so ALL states (idle/walk/run/jump/fall/climb) change.
+
+local HttpService = game:GetService("HttpService")
+
+-- Roblox assetType numbers → Animate LocalScript folder names
+local TYPE_TO_FOLDER = {
+    [48] = "climb",
+    [50] = "fall",
+    [51] = "idle",
+    [52] = "jump",
+    [53] = "run",
+    [54] = "swim",
+    [55] = "walk",
+}
 
 local Animator = {}
 Animator.__index = Animator
 
--- Asset IDs sourced directly from the Roblox catalog API
--- (catalog.roblox.com/v1/bundles/{id}/details) — these are the real
--- animation asset IDs, not catalog page IDs.
+-- Bundle IDs come directly from the Roblox catalog URL, e.g.
+-- roblox.com/bundles/43/Toy-Animation-Pack  →  bundleId = 43
 Animator.PRESETS = {
-	{ name = "None",       id = nil          },
-	{ name = "TOY",        id = "973771666"  }, -- bundle 43
-	{ name = "Robot",      id = "619521748"  }, -- bundle 82
-	{ name = "Superhero",  id = "619528125"  }, -- bundle 81
-	{ name = "Zombie",     id = "619535834"  }, -- bundle 80
-	{ name = "Levitation", id = "619542203"  }, -- bundle 79
-	{ name = "Stylish",    id = "619511648"  }, -- bundle 83
-	{ name = "Ninja",      id = "658832408"  }, -- bundle 75
-	{ name = "Knight",     id = "734327140"  }, -- bundle 68
-	{ name = "Mage",       id = "754637456"  }, -- bundle 63
-	{ name = "Pirate",     id = "837024662"  }, -- bundle 55
+    { name = "None",       bundleId = nil },
+    { name = "TOY",        bundleId = 43  },
+    { name = "Pirate",     bundleId = 55  },
+    { name = "Mage",       bundleId = 63  },
+    { name = "Knight",     bundleId = 68  },
+    { name = "Ninja",      bundleId = 75  },
+    { name = "Levitation", bundleId = 79  },
+    { name = "Zombie",     bundleId = 80  },
+    { name = "Superhero",  bundleId = 81  },
+    { name = "Robot",      bundleId = 82  },
+    { name = "Stylish",    bundleId = 83  },
 }
 
 function Animator.presetNames()
-	local t = {}
-	for _, p in ipairs(Animator.PRESETS) do t[#t + 1] = p.name end
-	return t
+    local t = {}
+    for _, p in ipairs(Animator.PRESETS) do t[#t + 1] = p.name end
+    return t
 end
 
--- Accepts bare number, "rbxassetid://...", or any string containing digits
-local function parseId(raw)
-	if not raw or raw == "" then return nil end
-	local n = tostring(raw):match("%d+")
-	return n and ("rbxassetid://" .. n) or nil
+-- ── Catalog API helper ────────────────────────────────────────────────────────
+
+local function fetchBundleAnims(bundleId)
+    local url = "https://catalog.roblox.com/v1/bundles/"
+                .. tostring(bundleId) .. "/details"
+
+    local ok, raw = pcall(game.HttpGet, game, url)
+    if not ok then
+        warn("[Animator] HttpGet failed:", raw)
+        return nil
+    end
+
+    local ok2, data = pcall(HttpService.JSONDecode, HttpService, raw)
+    if not ok2 or not data or not data.items then
+        warn("[Animator] JSON parse failed")
+        return nil
+    end
+
+    local anims = {}
+    for _, item in ipairs(data.items) do
+        local folder = TYPE_TO_FOLDER[item.assetType]
+        if item.type == "Asset" and folder then
+            anims[folder] = "rbxassetid://" .. tostring(item.id)
+        end
+    end
+    return anims
 end
+
+-- ── Core ──────────────────────────────────────────────────────────────────────
 
 function Animator.new()
-	return setmetatable({
-		_track      = nil,
-		_anim       = nil,
-		_currentId  = nil,
-		_animScript = nil,
-	}, Animator)
+    return setmetatable({
+        _animScript    = nil,
+        _originals     = {},
+        _track         = nil,   -- custom single-anim track
+        _anim          = nil,
+        _currentBundle = nil,
+    }, Animator)
 end
 
--- ── Internal ──────────────────────────────────────────────────────────────────
+-- Apply a full animation bundle: patches ALL states then restarts Animate.
+function Animator:applyBundle(character, bundleId)
+    self:stop()
 
-function Animator:_disableAnimate(character)
-	local s = character:FindFirstChild("Animate")
-	if s then
-		s.Disabled    = true
-		self._animScript = s
-	end
+    local animScript = character:FindFirstChild("Animate")
+    if not animScript then
+        warn("[Animator] No Animate LocalScript on character")
+        return
+    end
+
+    -- Fetch real asset IDs from the Roblox catalog API
+    local anims = fetchBundleAnims(bundleId)
+    if not anims then return end
+
+    -- Save originals so stop() can restore them
+    local originals = {}
+    for _, desc in ipairs(animScript:GetDescendants()) do
+        if desc:IsA("Animation") then
+            originals[desc] = desc.AnimationId
+        end
+    end
+    self._originals  = originals
+    self._animScript = animScript
+
+    -- Patch every Animation instance in each state folder
+    for folder, assetId in pairs(anims) do
+        local f = animScript:FindFirstChild(folder)
+        if f then
+            for _, child in ipairs(f:GetChildren()) do
+                if child:IsA("Animation") then
+                    child.AnimationId = assetId
+                end
+            end
+        end
+    end
+
+    -- Restart Animate so it reloads tracks with the new IDs
+    animScript.Disabled = true
+    task.wait()
+    animScript.Disabled = false
+
+    self._currentBundle = bundleId
 end
 
-function Animator:_enableAnimate()
-	if self._animScript then
-		self._animScript.Disabled = false
-		self._animScript = nil
-	end
-end
-
--- ── Public API ────────────────────────────────────────────────────────────────
-
+-- Play a single custom animation ID at Action4 priority (looping).
 function Animator:play(character, rawId)
-	self:stop()
+    self:stop()
 
-	local assetId = parseId(rawId)
-	if not assetId then
-		warn("[Animator] Invalid ID:", tostring(rawId))
-		return
-	end
+    local n = tostring(rawId):match("%d+")
+    if not n then
+        warn("[Animator] Invalid ID:", tostring(rawId))
+        return
+    end
+    local assetId = "rbxassetid://" .. n
 
-	local humanoid    = character:FindFirstChildOfClass("Humanoid")
-	local animatorObj = humanoid and humanoid:FindFirstChildOfClass("Animator")
-	if not animatorObj then
-		warn("[Animator] No Animator on character")
-		return
-	end
+    local humanoid    = character:FindFirstChildOfClass("Humanoid")
+    local animatorObj = humanoid and humanoid:FindFirstChildOfClass("Animator")
+    if not animatorObj then return end
 
-	-- 1. Disable Animate LocalScript so it cannot override our track
-	self:_disableAnimate(character)
+    local animScript = character:FindFirstChild("Animate")
+    if animScript then
+        animScript.Disabled = true
+        self._animScript = animScript
+    end
 
-	-- 2. Kill every active track immediately
-	for _, t in ipairs(animatorObj:GetPlayingAnimationTracks()) do
-		t:Stop(0)
-	end
+    for _, t in ipairs(animatorObj:GetPlayingAnimationTracks()) do
+        t:Stop(0)
+    end
 
-	-- 3. Load animation — wrap in pcall to catch synchronous errors
-	local anim = Instance.new("Animation")
-	anim.AnimationId = assetId
+    local anim  = Instance.new("Animation")
+    anim.AnimationId = assetId
+    local track = animatorObj:LoadAnimation(anim)
+    track.Priority = Enum.AnimationPriority.Action4
+    track.Looped   = true
+    track:Play(0)
 
-	local ok, track = pcall(function()
-		return animatorObj:LoadAnimation(anim)
-	end)
+    self._track = track
+    self._anim  = anim
 
-	if not ok or not track then
-		warn("[Animator] LoadAnimation error for", rawId, ":", tostring(track))
-		anim:Destroy()
-		self:_enableAnimate()   -- restore so character is not frozen
-		return
-	end
-
-	track.Priority = Enum.AnimationPriority.Action4
-	track.Looped   = true
-	track:Play(0)
-
-	self._track     = track
-	self._anim      = anim
-	self._currentId = rawId
-
-	-- 4. Async safety net: AnimationTrack.Length stays 0 when the asset
-	--    fails to load from the CDN (wrong/restricted ID). After 2 s, if the
-	--    track has no length, it loaded nothing — re-enable Animate so the
-	--    character is not left as a statue.
-	task.delay(2, function()
-		if self._track ~= track then return end   -- animation already changed
-		if track.Length == 0 then
-			warn("[Animator] Animation has no length after 2s (bad ID?):", rawId)
-			self:stop()
-		end
-	end)
+    -- If the animation never actually loads (bad ID), recover after 2 s
+    task.delay(2, function()
+        if self._track ~= track then return end
+        if track.Length == 0 then
+            warn("[Animator] Animation failed to load (bad ID?):", rawId)
+            self:stop()
+        end
+    end)
 end
 
 function Animator:stop()
-	if self._track then
-		self._track:Stop(0)
-		self._track:Destroy()
-		self._track = nil
-	end
-	if self._anim then
-		self._anim:Destroy()
-		self._anim = nil
-	end
-	self:_enableAnimate()
-	self._currentId = nil
+    -- Clean up custom track
+    if self._track then
+        pcall(function() self._track:Stop(0) end)
+        pcall(function() self._track:Destroy() end)
+        self._track = nil
+    end
+    if self._anim then
+        pcall(function() self._anim:Destroy() end)
+        self._anim = nil
+    end
+
+    -- Restore original Animation IDs and restart Animate
+    if self._animScript then
+        pcall(function()
+            for desc, id in pairs(self._originals) do
+                desc.AnimationId = id
+            end
+            self._animScript.Disabled = true
+            task.wait()
+            self._animScript.Disabled = false
+        end)
+        self._animScript = nil
+    end
+
+    self._originals     = {}
+    self._currentBundle = nil
 end
 
-function Animator:replayOn(character)
-	if self._currentId then
-		local id        = self._currentId
-		self._currentId = nil
-		self._animScript = nil
-		self:play(character, id)
-	end
-end
-
-function Animator:getCurrentId()
-	return self._currentId
+function Animator:getCurrentBundle()
+    return self._currentBundle
 end
 
 return Animator
