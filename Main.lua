@@ -21,7 +21,16 @@ local Interface  = loadModule("Interface")
 
 local player     = Players.LocalPlayer
 local controller = Controller.new()
-local interface  = Interface.new()
+local interface  = Interface.new({
+	onFlightToggle = function(val)
+		local character = player.Character
+		if not character then return end
+		if val then controller:enable(character) else controller:disable(character) end
+	end,
+	onBoostToggle = function(val)
+		controller:setBoosting(val)
+	end,
+})
 
 -- ── Toggle flight: F ──────────────────────────────────────────────────────────
 
