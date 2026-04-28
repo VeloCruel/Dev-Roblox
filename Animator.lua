@@ -6,20 +6,21 @@
 local Animator = {}
 Animator.__index = Animator
 
--- Only verified R15-compatible idle animation asset IDs are listed.
--- IDs that produced "Animation failed to load" errors have been removed.
+-- Asset IDs sourced directly from the Roblox catalog API
+-- (catalog.roblox.com/v1/bundles/{id}/details) — these are the real
+-- animation asset IDs, not catalog page IDs.
 Animator.PRESETS = {
-	{ name = "None",       id = nil           },
-	{ name = "Default",    id = "507766388"   }, -- R15 default idle  (guaranteed)
-	{ name = "TOY",        id = "782841498"   }, -- TOY package idle
-	{ name = "Superhero",  id = "616072382"   }, -- Superhero package idle
-	{ name = "Zombie",     id = "616163890"   }, -- Zombie package idle
-	{ name = "Ninja",      id = "656118852"   }, -- Ninja package idle
-	{ name = "Astronaut",  id = "891836989"   }, -- Astronaut package idle
-	{ name = "Mage",       id = "707855543"   }, -- Mage package idle
-	{ name = "Knight",     id = "657564596"   }, -- Knight package idle
-	{ name = "Pirate",     id = "750711522"   }, -- Pirate package idle
-	{ name = "Werewolf",   id = "1083216690"  }, -- Werewolf package idle
+	{ name = "None",       id = nil          },
+	{ name = "TOY",        id = "973771666"  }, -- bundle 43
+	{ name = "Robot",      id = "619521748"  }, -- bundle 82
+	{ name = "Superhero",  id = "619528125"  }, -- bundle 81
+	{ name = "Zombie",     id = "619535834"  }, -- bundle 80
+	{ name = "Levitation", id = "619542203"  }, -- bundle 79
+	{ name = "Stylish",    id = "619511648"  }, -- bundle 83
+	{ name = "Ninja",      id = "658832408"  }, -- bundle 75
+	{ name = "Knight",     id = "734327140"  }, -- bundle 68
+	{ name = "Mage",       id = "754637456"  }, -- bundle 63
+	{ name = "Pirate",     id = "837024662"  }, -- bundle 55
 }
 
 function Animator.presetNames()
