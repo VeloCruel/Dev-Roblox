@@ -1,14 +1,16 @@
--- Interface.lua — Rayfield UI integration
+-- Interface.lua — Rayfield UI
+-- Interface.new(callbacks) where callbacks = { onFlightToggle(bool), onBoostToggle(bool) }
 
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local Interface = {}
 Interface.__index = Interface
 
-function Interface.new()
-	local self = setmetatable({}, Interface)
+function Interface.new(callbacks)
+	local self      = setmetatable({}, Interface)
 	self._lastState = nil
 	self._lastSpeed = -1
+	self._syncing   = false   -- guard against callback loops when we set toggles
 
 	self._win = Rayfield:CreateWindow({
 		Name                   = "Flight System",
@@ -21,13 +23,52 @@ function Interface.new()
 		KeySystem              = false,
 	})
 
-	local tab = self._win:CreateTab("HUD", 4483362458)
-	tab:CreateSection("Flight Status")
+	-- ── Controls tab ──────────────────────────────────────────────────────────
 
-	self._statusLabel = tab:CreateLabel("FLIGHT   OFF")
-	self._speedLabel  = tab:CreateLabel("SPD  0 u/s")
+	local ctrlTab = self._win:CreateTab("Controls", 4483362458)
+	ctrlTab:CreateSection("Toggles")
+
+	self._flightToggle = ctrlTab:CreateToggle({
+		Name         = "Enable Flight  [F]",
+		CurrentValue = false,
+		Flag         = "FlightEnabled",
+		Callback     = function(val)
+			if self._syncing then return end
+			if callbacks and callbacks.onFlightToggle then
+				callbacks.onFlightToggle(val)
+			end
+		end,
+	})
+
+	self._boostToggle = ctrlTab:CreateToggle({
+		Name         = "Speed Boost  [Shift]",
+		CurrentValue = false,
+		Flag         = "BoostEnabled",
+		Callback     = function(val)
+			if self._syncing then return end
+			if callbacks and callbacks.onBoostToggle then
+				callbacks.onBoostToggle(val)
+			end
+		end,
+	})
+
+	-- ── HUD tab ───────────────────────────────────────────────────────────────
+
+	local hudTab = self._win:CreateTab("HUD", 4483362458)
+	hudTab:CreateSection("Live Stats")
+
+	self._statusLabel = hudTab:CreateLabel("FLIGHT   OFF")
+	self._speedLabel  = hudTab:CreateLabel("SPD  0 u/s")
 
 	return self
+end
+
+-- Sync Rayfield toggle without re-firing the user callback
+function Interface:_setToggle(toggle, value)
+	if not toggle then return end
+	self._syncing = true
+	toggle:Set(value)
+	self._syncing = false
 end
 
 function Interface:update(isFlying, speed, isBoosting)
@@ -45,6 +86,10 @@ function Interface:update(isFlying, speed, isBoosting)
 
 		self._statusLabel:Set(statusText)
 
+		-- Sync toggles to reflect state changes made via F / Shift keys
+		self:_setToggle(self._flightToggle, isFlying)
+		self:_setToggle(self._boostToggle,  isBoosting)
+
 		Rayfield:Notify({
 			Title    = "Flight System",
 			Content  = statusText,
@@ -52,7 +97,6 @@ function Interface:update(isFlying, speed, isBoosting)
 		})
 	end
 
-	-- Only write to the label when the rounded value actually changes
 	local rounded = math.floor(speed + 0.5)
 	if rounded ~= self._lastSpeed then
 		self._lastSpeed = rounded
@@ -61,9 +105,7 @@ function Interface:update(isFlying, speed, isBoosting)
 end
 
 function Interface:destroy()
-	self._win         = nil
-	self._statusLabel = nil
-	self._speedLabel  = nil
+	self._win = nil
 end
 
 return Interface
