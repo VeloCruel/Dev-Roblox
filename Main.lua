@@ -137,15 +137,7 @@ end)
 
 player.CharacterRemoving:Connect(function(character)
     controller:disable(character)
-    -- Don't call animator:stop() here — it would clear lastBundleId.
-    -- The old character's Animate script gets destroyed anyway.
-    animator._animScript    = nil
-    animator._originals     = {}
-    animator._currentBundle = nil
-    if animator._track then
-        pcall(function() animator._track:Stop(0) end)
-        animator._track = nil
-    end
+    animator:stop()
 end)
 
 player.CharacterAdded:Connect(function(character)
