@@ -42,7 +42,8 @@ local interface = Interface.new({
 		controller:setBoosting(val)
 	end,
 
-	onAnimPreset = function(name)
+	onAnimPreset = function(option)
+		local name      = type(option) == "table" and option[1] or option
 		local character = player.Character
 		if not character then return end
 		local id = presetMap[name]
