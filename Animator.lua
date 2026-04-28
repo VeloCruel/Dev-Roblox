@@ -1,15 +1,16 @@
 -- Animator.lua
--- Fetches the real idle animation ID from the Roblox catalog API at runtime.
--- Uses Animator.AnimationPlayed to intercept and stop every track the game
--- tries to play, so ours can never be overridden.
+-- Applies a custom looped animation by disabling the character's built-in
+-- Animate script and playing the chosen track at the highest priority.
+-- Bundle presets: idle animation ID is fetched once from the catalog API
+-- and cached so repeated selects skip the HTTP round-trip.
 
 local HttpService = game:GetService("HttpService")
 
-local Animator = {}
+local Animator   = {}
 Animator.__index = Animator
 
--- Only the bundle ID is stored — the real animation asset ID is fetched live
--- from catalog.roblox.com so it is always correct and up to date.
+-- ── Presets ───────────────────────────────────────────────────────────────────
+
 Animator.PRESETS = {
     { name = "None",       bundleId = nil },
     { name = "TOY",        bundleId = 43  },
@@ -30,92 +31,121 @@ function Animator.presetNames()
     return t
 end
 
--- assetType 51 = Idle in Roblox's animation bundle schema
+-- ── Idle-ID fetch (cached) ────────────────────────────────────────────────────
+
+local _cache = {}
+
+-- Catalog API: assetType 51 = IdleAnimation (Enum.AssetType value).
+-- Older endpoint versions return assetType as a plain integer; newer ones
+-- return an object { id = 51, name = "IdleAnimation" }.  Both are handled.
 local function fetchIdleId(bundleId)
+    if _cache[bundleId] then return _cache[bundleId] end
+
     local ok, raw = pcall(game.HttpGet, game,
         "https://catalog.roblox.com/v1/bundles/" .. bundleId .. "/details")
-    if not ok then warn("[Animator] HttpGet failed:", raw); return nil end
+    if not ok then
+        warn("[Animator] HTTP request failed for bundle", bundleId, "–", raw)
+        return nil
+    end
 
     local ok2, data = pcall(HttpService.JSONDecode, HttpService, raw)
-    if not ok2 or not data or not data.items then warn("[Animator] Bad JSON"); return nil end
+    if not ok2 or type(data) ~= "table" or type(data.items) ~= "table" then
+        warn("[Animator] Unexpected response format for bundle", bundleId)
+        return nil
+    end
 
     for _, item in ipairs(data.items) do
-        -- assetType may be a plain number or a nested table {id, name} depending on API version
-        local assetTypeId = type(item.assetType) == "table" and item.assetType.id or item.assetType
-        if item.type == "Asset" and assetTypeId == 51 then
-            return tostring(item.id)
+        local typeId = type(item.assetType) == "table" and item.assetType.id or item.assetType
+        if item.type == "Asset" and typeId == 51 then
+            local id = tostring(item.id)
+            _cache[bundleId] = id
+            return id
         end
     end
+
     warn("[Animator] No idle animation found in bundle", bundleId)
     return nil
 end
 
+-- ── Character helpers ─────────────────────────────────────────────────────────
+
+local function getAnimObj(character)
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    return hum and hum:FindFirstChildOfClass("Animator")
+end
+
+-- Disable the Animate script and stop every track so our animation plays clean.
+local function suppressAnimate(character)
+    local animScript = character:FindFirstChild("Animate")
+    if animScript then animScript.Disabled = true end
+
+    local animObj = getAnimObj(character)
+    if animObj then
+        for _, t in ipairs(animObj:GetPlayingAnimationTracks()) do
+            t:Stop(0)
+        end
+    end
+
+    return animObj
+end
+
+-- Re-enable the Animate script so normal character animations resume.
+local function restoreAnimate(character)
+    if not character or not character.Parent then return end
+    local animScript = character:FindFirstChild("Animate")
+    if animScript then animScript.Disabled = false end
+end
+
+-- ── Animator class ────────────────────────────────────────────────────────────
+
 function Animator.new()
     return setmetatable({
-        _track      = nil,
-        _anim       = nil,
-        _connection = nil,
+        _track = nil,
+        _anim  = nil,
+        _char  = nil,
     }, Animator)
 end
 
--- Internal: load and lock an animation by its numeric asset ID string
-function Animator:_lock(character, numericId)
+-- Internal: disable Animate, load, and play the given asset ID on character.
+function Animator:_apply(character, assetId)
     self:stop()
 
-    local humanoid    = character:FindFirstChildOfClass("Humanoid")
-    local animatorObj = humanoid and humanoid:FindFirstChildOfClass("Animator")
-    if not humanoid or not animatorObj then
-        warn("[Animator] No Humanoid/Animator")
+    local animObj = suppressAnimate(character)
+    if not animObj then
+        warn("[Animator] Character has no Animator object")
         return
     end
 
-    -- Kill every currently-playing track
-    for _, t in ipairs(animatorObj:GetPlayingAnimationTracks()) do
-        t:Stop(0)
-    end
-
-    -- Build and load our track
     local anim = Instance.new("Animation")
-    anim.AnimationId = "rbxassetid://" .. numericId
+    anim.AnimationId = "rbxassetid://" .. assetId
 
-    local track = animatorObj:LoadAnimation(anim)
+    local track = animObj:LoadAnimation(anim)
     track.Priority = Enum.AnimationPriority.Action4
     track.Looped   = true
+    track:Play(0)
 
     self._track = track
     self._anim  = anim
-
-    -- Capture track by value so the closure is correct even if self._track
-    -- changes (e.g. stop() is called) before a deferred AnimationPlayed fires.
-    local ownTrack = track
-    self._connection = animatorObj.AnimationPlayed:Connect(function(t)
-        if t ~= ownTrack then
-            t:Stop(0)
-        end
-    end)
-
-    track:Play(0)
+    self._char  = character
 end
 
 -- ── Public API ────────────────────────────────────────────────────────────────
 
+-- Apply the idle animation from a catalog bundle.
 function Animator:applyBundle(character, bundleId)
-    local idleId = fetchIdleId(bundleId)
-    if not idleId then return end
-    self:_lock(character, idleId)
+    local id = fetchIdleId(bundleId)
+    if id then self:_apply(character, id) end
 end
 
+-- Apply an animation by raw asset ID or full rbxassetid:// URL.
 function Animator:play(character, rawId)
-    local n = tostring(rawId):match("%d+")
-    if not n then warn("[Animator] Invalid ID:", rawId); return end
-    self:_lock(character, n)
+    local id = tostring(rawId):match("%d+")
+    if not id then warn("[Animator] Invalid animation ID:", rawId); return end
+    self:_apply(character, id)
 end
 
+-- Stop the custom animation and restore normal character animations.
 function Animator:stop()
-    if self._connection then
-        self._connection:Disconnect()
-        self._connection = nil
-    end
     if self._track then
         pcall(function() self._track:Stop(0) end)
         pcall(function() self._track:Destroy() end)
@@ -124,6 +154,10 @@ function Animator:stop()
     if self._anim then
         pcall(function() self._anim:Destroy() end)
         self._anim = nil
+    end
+    if self._char then
+        restoreAnimate(self._char)
+        self._char = nil
     end
 end
 
