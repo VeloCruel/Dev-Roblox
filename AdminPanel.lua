@@ -49,6 +49,10 @@ local TweenService     = game:GetService("TweenService")
 local Lighting         = game:GetService("Lighting")
 local Workspace        = game:GetService("Workspace")
 local CoreGui          = game:GetService("CoreGui")
+local TeleportService  = game:GetService("TeleportService")
+local HttpService      = game:GetService("HttpService")
+local VirtualUser      = game:GetService("VirtualUser")
+local StarterGui       = game:GetService("StarterGui")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
@@ -89,6 +93,16 @@ local Theme = {
     Ok          = Color3.fromRGB(86, 210, 140),
     Warn        = Color3.fromRGB(240, 184, 80),
     Err         = Color3.fromRGB(240, 100, 100),
+}
+
+-- Built-in theme presets (selectable from the Settings tab at runtime).
+local ThemePresets = {
+    Midnight = { Accent = Color3.fromRGB(120, 150, 255), AccentSoft = Color3.fromRGB(165, 185, 255), AccentDeep = Color3.fromRGB(75, 95, 200) },
+    Cyber    = { Accent = Color3.fromRGB(0, 230, 200),   AccentSoft = Color3.fromRGB(120, 255, 230), AccentDeep = Color3.fromRGB(0, 130, 130) },
+    Sunset   = { Accent = Color3.fromRGB(255, 130, 90),  AccentSoft = Color3.fromRGB(255, 175, 130), AccentDeep = Color3.fromRGB(190, 85, 60) },
+    Mint     = { Accent = Color3.fromRGB(110, 220, 160), AccentSoft = Color3.fromRGB(165, 240, 200), AccentDeep = Color3.fromRGB(70, 160, 110) },
+    Crimson  = { Accent = Color3.fromRGB(240, 90, 110),  AccentSoft = Color3.fromRGB(255, 140, 150), AccentDeep = Color3.fromRGB(170, 50, 70) },
+    Royal    = { Accent = Color3.fromRGB(180, 110, 255), AccentSoft = Color3.fromRGB(205, 165, 255), AccentDeep = Color3.fromRGB(120, 60, 200) },
 }
 
 -- Built-in Roblox UI assets used for glow / shadow / corner / icons.
@@ -231,17 +245,33 @@ local State = {
     invisible   = false,
     spectating  = nil :: Player?,
     target      = nil :: Player?,
+    specIndex   = 0,
 
     vSpeedMult  = 1, vInstant = false, vFly = false,
 
     fov         = 70,  fovOn     = false,
     gravity     = workspace.Gravity, gravityOn = false,
     esp         = false, tracers = false, fullbright = false,
+
+    -- Premium feature state
+    freecam       = false,
+    freecamSpeed  = 80,
+    antiAFK       = false,
+    autoRespawn   = false,
+    hitbox        = false,
+    hitboxSize    = 8,
+    clickTP       = false,
+    coordHUD      = false,
+    waypoints     = {} :: { [string]: { x: number, y: number, z: number } },
+    keybinds      = {} :: { [string]: string },                    -- action → KeyCode.Name
+    themeName     = "Midnight",
 }
 
 local Maids = {
     fly = Maid.new(), noclip = Maid.new(), infJump = Maid.new(),
     invis = Maid.new(), vfly = Maid.new(), tracers = Maid.new(), rgb = Maid.new(),
+    freecam = Maid.new(), antiAFK = Maid.new(), autoRespawn = Maid.new(),
+    hitbox = Maid.new(), clickTP = Maid.new(), coordHUD = Maid.new(),
 }
 
 local Log: { string } = {}
@@ -826,6 +856,331 @@ local function setFullbright(on: boolean)
         for k, v in pairs(FBBackup) do (Lighting :: any)[k] = v end
         table.clear(FBBackup)
     end
+end
+
+-- ── Spectate cycle: hop through the player list with next/prev
+local function cycleSpectate(direction: number)
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then table.insert(list, p) end
+    end
+    if #list == 0 then return notify("No other players", "warn") end
+    State.specIndex = ((State.specIndex - 1 + direction) % #list) + 1
+    setSpectate(list[State.specIndex])
+    notify("Spectating " .. list[State.specIndex].Name, "info")
+end
+
+-- ── Freecam: scriptable camera, WASD + mouse-look + scroll-zoom-speed
+local function setFreecam(on: boolean)
+    if State.freecam == on then return end
+    State.freecam = on
+    Maids.freecam:clean()
+    if not on then
+        Camera.CameraType = Enum.CameraType.Custom
+        local h = humanoid(); if h then Camera.CameraSubject = h end
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        return
+    end
+
+    Camera.CameraType = Enum.CameraType.Scriptable
+    local startCF = Camera.CFrame
+    local pos     = startCF.Position
+    local lookVec = startCF.LookVector
+    local yaw     = math.atan2(-lookVec.X, -lookVec.Z)
+    local pitch   = math.asin(math.clamp(lookVec.Y, -1, 1))
+    local sens    = 0.0035
+    local speed   = State.freecamSpeed
+
+    UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+    Maids.freecam:give(function() UserInputService.MouseBehavior = Enum.MouseBehavior.Default end)
+
+    Maids.freecam:give(UserInputService.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            yaw   -= input.Delta.X * sens
+            pitch  = math.clamp(pitch - input.Delta.Y * sens, -math.rad(89), math.rad(89))
+        elseif input.UserInputType == Enum.UserInputType.MouseWheel then
+            speed = math.clamp(speed + input.Position.Z * 15, 10, 600)
+            State.freecamSpeed = speed
+        end
+    end))
+
+    Maids.freecam:give(RunService.RenderStepped:Connect(function(dt)
+        local fwd   = Vector3.new(-math.sin(yaw) * math.cos(pitch),
+                                   math.sin(pitch),
+                                  -math.cos(yaw) * math.cos(pitch))
+        local right = Vector3.new(math.cos(yaw), 0, -math.sin(yaw))
+
+        local dir = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W)            then dir += fwd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S)            then dir -= fwd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A)            then dir -= right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D)            then dir += right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space)        then dir += Vector3.yAxis end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)  then dir -= Vector3.yAxis end
+
+        local mult = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) and 3 or 1
+        pos = pos + (dir.Magnitude > 0 and dir.Unit or Vector3.zero) * speed * mult * dt
+        Camera.CFrame = CFrame.new(pos) * CFrame.fromOrientation(pitch, yaw, 0)
+    end))
+end
+
+-- ── Anti-AFK: simulate input every ~25s; safe no-op if VirtualUser missing
+local function setAntiAFK(on: boolean)
+    if State.antiAFK == on then return end
+    State.antiAFK = on
+    Maids.antiAFK:clean()
+    if not on then return end
+    Maids.antiAFK:give(LocalPlayer.Idled:Connect(function()
+        if VirtualUser then
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.zero)
+            end)
+        end
+    end))
+end
+
+-- ── Auto-respawn: Humanoid.Died → LoadCharacter
+local function setAutoRespawn(on: boolean)
+    if State.autoRespawn == on then return end
+    State.autoRespawn = on
+    Maids.autoRespawn:clean()
+    if not on then return end
+    local function hook(c: Instance)
+        local h = c:WaitForChild("Humanoid", 5) :: Humanoid?
+        if not h then return end
+        Maids.autoRespawn:give(h.Died:Connect(function()
+            task.wait(0.5)
+            if State.autoRespawn then pcall(function() LocalPlayer:LoadCharacter() end) end
+        end))
+    end
+    if LocalPlayer.Character then hook(LocalPlayer.Character) end
+    Maids.autoRespawn:give(LocalPlayer.CharacterAdded:Connect(hook))
+end
+
+-- ── Hitbox extender: resize HRP for PvP advantage
+local hitboxBackup: { Size: Vector3, Trans: number, CanCollide: boolean }? = nil
+local function applyHitbox()
+    local root = hrp()
+    if not root then return end
+    if State.hitbox then
+        if not hitboxBackup then
+            hitboxBackup = { Size = root.Size, Trans = root.Transparency, CanCollide = root.CanCollide }
+        end
+        root.Size         = Vector3.new(State.hitboxSize, State.hitboxSize, State.hitboxSize)
+        root.Transparency = 0.7
+        root.CanCollide   = false
+    elseif hitboxBackup then
+        root.Size         = hitboxBackup.Size
+        root.Transparency = hitboxBackup.Trans
+        root.CanCollide   = hitboxBackup.CanCollide
+        hitboxBackup      = nil
+    end
+end
+local function setHitbox(on: boolean)
+    if State.hitbox == on then return end
+    State.hitbox = on
+    Maids.hitbox:clean()
+    if not on then applyHitbox(); return end
+    applyHitbox()
+    -- Re-enforce because some games periodically resize the HRP.
+    Maids.hitbox:give(RunService.Heartbeat:Connect(function()
+        local root = hrp()
+        if root and root.Size.X < State.hitboxSize - 0.1 then applyHitbox() end
+    end))
+end
+
+-- ── Waypoints (saved positions)
+local function saveWaypoint(name: string)
+    if name == "" then return notify("Waypoint name required", "warn") end
+    local r = hrp(); if not r then return end
+    State.waypoints[name] = { x = r.Position.X, y = r.Position.Y, z = r.Position.Z }
+    notify("Waypoint saved: " .. name, "ok")
+end
+local function teleportWaypoint(name: string)
+    local wp = State.waypoints[name]
+    if not wp then return notify("Waypoint not found: " .. name, "err") end
+    local r = hrp(); if not r then return end
+    r.CFrame = CFrame.new(wp.x, wp.y, wp.z)
+end
+local function deleteWaypoint(name: string)
+    State.waypoints[name] = nil
+    notify("Waypoint removed: " .. name, "info")
+end
+
+-- ── Click TP: hold modifier + click world to teleport there
+local function setClickTP(on: boolean)
+    if State.clickTP == on then return end
+    State.clickTP = on
+    Maids.clickTP:clean()
+    if not on then return end
+    Maids.clickTP:give(UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+        if not UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then return end
+
+        local mouse = LocalPlayer:GetMouse()
+        local pos   = mouse.Hit and mouse.Hit.Position
+        local r     = hrp()
+        if pos and r then
+            r.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+            notify(("Teleported to (%d, %d, %d)"):format(pos.X, pos.Y, pos.Z), "info")
+        end
+    end))
+end
+
+-- ── Coordinate HUD: live X/Y/Z + speed in a corner overlay
+local coordHud: Frame?
+local function setCoordHUD(on: boolean)
+    if State.coordHUD == on then return end
+    State.coordHUD = on
+    Maids.coordHUD:clean()
+    if not on then
+        if coordHud then coordHud:Destroy(); coordHud = nil end
+        return
+    end
+    coordHud = new("Frame", {
+        Name                   = "CoordHUD",
+        AnchorPoint            = Vector2.new(0, 1),
+        Position               = UDim2.new(0, 12, 1, -12),
+        Size                   = UDim2.fromOffset(180, 60),
+        BackgroundColor3       = Theme.Bg2,
+        BackgroundTransparency = 0.2,
+        BorderSizePixel        = 0,
+        Parent                 = gui,
+    }, {
+        new("UICorner", { CornerRadius = UDim.new(0, 10) }),
+        new("UIStroke", { Color = Theme.BorderSoft, Transparency = 0.4 }),
+        new("UIPadding", {
+            PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+            PaddingTop = UDim.new(0, 6),    PaddingBottom = UDim.new(0, 6),
+        }),
+    }) :: Frame
+    local posLbl = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Size                   = UDim2.new(1, 0, 0, 16),
+        Font                   = Enum.Font.Code,
+        Text                   = "",
+        TextColor3             = Theme.Text,
+        TextSize               = 12,
+        TextXAlignment         = Enum.TextXAlignment.Left,
+        Parent                 = coordHud,
+    }) :: TextLabel
+    local velLbl = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Position               = UDim2.new(0, 0, 0, 18),
+        Size                   = UDim2.new(1, 0, 0, 16),
+        Font                   = Enum.Font.Code,
+        Text                   = "",
+        TextColor3             = Theme.TextDim,
+        TextSize               = 11,
+        TextXAlignment         = Enum.TextXAlignment.Left,
+        Parent                 = coordHud,
+    }) :: TextLabel
+    local fpsLbl = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Position               = UDim2.new(0, 0, 0, 32),
+        Size                   = UDim2.new(1, 0, 0, 14),
+        Font                   = Enum.Font.Code,
+        Text                   = "",
+        TextColor3             = Theme.AccentSoft,
+        TextSize               = 10,
+        TextXAlignment         = Enum.TextXAlignment.Left,
+        Parent                 = coordHud,
+    }) :: TextLabel
+
+    local fpsAvg, lastT = 60, os.clock()
+    Maids.coordHUD:give(RunService.RenderStepped:Connect(function(dt)
+        local r = hrp()
+        if r then
+            posLbl.Text = ("X %d  Y %d  Z %d"):format(r.Position.X, r.Position.Y, r.Position.Z)
+            velLbl.Text = ("speed %.1f stud/s"):format(r.AssemblyLinearVelocity.Magnitude)
+        end
+        fpsAvg = fpsAvg * 0.95 + (1 / math.max(dt, 1e-4)) * 0.05
+        fpsLbl.Text = ("%d fps"):format(math.floor(fpsAvg))
+    end))
+    Maids.coordHUD:give(function() if coordHud then coordHud:Destroy(); coordHud = nil end end)
+end
+
+-- ── Rejoin & server-hop
+local function rejoinServer()
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end)
+end
+local function serverHop()
+    pcall(function()
+        local raw = game:HttpGet(("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(game.PlaceId))
+        local data = HttpService:JSONDecode(raw)
+        local candidates = {}
+        for _, s in ipairs(data.data or {}) do
+            if s.id ~= game.JobId and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
+                table.insert(candidates, s.id)
+            end
+        end
+        if #candidates == 0 then return notify("No other servers found", "warn") end
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, candidates[math.random(1, #candidates)], LocalPlayer)
+    end)
+end
+
+-- ── Theme switcher
+local function applyTheme(name: string)
+    local preset = ThemePresets[name]
+    if not preset then return end
+    State.themeName = name
+    Theme.Accent     = preset.Accent
+    Theme.AccentSoft = preset.AccentSoft
+    Theme.AccentDeep = preset.AccentDeep
+    applyAccent(preset.Accent)
+end
+
+-- ╔══════════════════════════════════════════════════════════════════════╗
+-- ║  CONFIG PERSISTENCE  (executor file API; no-op if unavailable)        ║
+-- ╚══════════════════════════════════════════════════════════════════════╝
+local CONFIG_FILE = "VeloCruelAdminPanel.json"
+
+local function hasFileAPI(): boolean
+    return typeof(rawget(getfenv(), "writefile")) == "function"
+       and typeof(rawget(getfenv(), "readfile"))  == "function"
+       and typeof(rawget(getfenv(), "isfile"))    == "function"
+end
+
+local function saveConfig()
+    if not hasFileAPI() then return end
+    local data = {
+        themeName     = State.themeName,
+        waypoints     = State.waypoints,
+        keybinds      = State.keybinds,
+        flySpeed      = State.flySpeed,
+        freecamSpeed  = State.freecamSpeed,
+        hitboxSize    = State.hitboxSize,
+        antiAFK       = State.antiAFK,
+        autoRespawn   = State.autoRespawn,
+        rgbCycle      = CONFIG.RGBCycle,
+        backdropBlur  = CONFIG.BackdropBlur,
+    }
+    local ok, encoded = pcall(function() return HttpService:JSONEncode(data) end)
+    if ok then pcall((rawget(getfenv(), "writefile") :: any), CONFIG_FILE, encoded) end
+end
+
+local function loadConfig()
+    if not hasFileAPI() then return end
+    local isfile  = rawget(getfenv(), "isfile")  :: (string) -> boolean
+    local readfile = rawget(getfenv(), "readfile") :: (string) -> string
+    if not isfile(CONFIG_FILE) then return end
+    local ok, raw = pcall(readfile, CONFIG_FILE)
+    if not ok then return end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or type(data) ~= "table" then return end
+
+    if data.themeName    then State.themeName    = data.themeName end
+    if data.waypoints    then State.waypoints    = data.waypoints end
+    if data.keybinds     then State.keybinds     = data.keybinds end
+    if data.flySpeed     then State.flySpeed     = data.flySpeed end
+    if data.freecamSpeed then State.freecamSpeed = data.freecamSpeed end
+    if data.hitboxSize   then State.hitboxSize   = data.hitboxSize end
+    if data.rgbCycle     ~= nil then CONFIG.RGBCycle     = data.rgbCycle end
+    if data.backdropBlur ~= nil then CONFIG.BackdropBlur = data.backdropBlur end
 end
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
@@ -1590,6 +1945,12 @@ Toggle(selfPage, "Invisible (local view)", function(v) setInvisible(v); pushLog(
 Button(selfPage, "Reset Character", function() resetChar(); notify("Reset", "info") end)
 Button(selfPage, "Sit",             function() sitNow() end)
 
+header(selfPage, "Combat")
+Toggle(selfPage, "Hitbox Extender", function(v) setHitbox(v); pushLog("hitbox " .. tostring(v)) end)
+Slider(selfPage, "Hitbox Size", 4, 24, State.hitboxSize, 1, function(v)
+    State.hitboxSize = v; if State.hitbox then applyHitbox() end
+end)
+
 -- ── PLAYERS
 local playersPage = makeTab("players", "◈", "Players")
 
@@ -1822,6 +2183,8 @@ Button(playersPage, "Teleport to Player", require_target(function(p) teleportTo(
 Button(playersPage, "Bring Player",       require_target(function(p) bring(p);         pushLog("bring " .. p.Name);  notify("Brought " .. p.Name .. " (client-side)", "ok") end))
 Button(playersPage, "Spectate Player",    require_target(function(p) setSpectate(p);   pushLog("spec " .. p.Name);   notify("Spectating " .. p.Name, "info") end))
 Button(playersPage, "Stop Spectating",                  function()  setSpectate(nil);  pushLog("unspec");             notify("Spectate cleared", "info") end)
+Button(playersPage, "Spectate Next",                    function()  cycleSpectate( 1) end)
+Button(playersPage, "Spectate Previous",                function()  cycleSpectate(-1) end)
 Button(playersPage, "View Player",        require_target(function(p) viewAtPlayer(p);  pushLog("view " .. p.Name);    notify("Viewing " .. p.Name, "info") end))
 Button(playersPage, "Freeze Player",      require_target(function(p) setFreeze(p, true);  pushLog("freeze " .. p.Name);   notify("Froze " .. p.Name, "ok") end))
 Button(playersPage, "Unfreeze Player",    require_target(function(p) setFreeze(p, false); pushLog("unfreeze " .. p.Name); notify("Unfroze " .. p.Name, "info") end))
@@ -1850,6 +2213,225 @@ header(funPage, "Visuals")
 Toggle(funPage, "ESP / Highlights", function(v) setESP(v) end)
 Toggle(funPage, "Tracers",          function(v) setTracers(v) end)
 Toggle(funPage, "Fullbright",       function(v) setFullbright(v) end)
+
+header(funPage, "Camera Tools")
+Toggle(funPage, "Freecam (WASD + mouse-look, Shift = fast)", function(v) setFreecam(v); pushLog("freecam " .. tostring(v)) end)
+Toggle(funPage, "Click-TP  (Shift + LMB on world)",          function(v) setClickTP(v); pushLog("clicktp " .. tostring(v)) end)
+Toggle(funPage, "Coord HUD",                                  function(v) setCoordHUD(v) end)
+
+-- ── WAYPOINTS
+local waypointsPage = makeTab("waypoints", "◆", "Waypoints")
+header(waypointsPage, "Save Position")
+
+local wpInputCard = glassSurface({
+    BackgroundColor3       = Theme.Bg3,
+    BackgroundTransparency = 0.2,
+    Size                   = UDim2.new(1, 0, 0, 38),
+    Parent                 = waypointsPage,
+    Radius                 = 10,
+})
+local wpNameInput = new("TextBox", {
+    BackgroundTransparency = 1,
+    Position               = UDim2.new(0, 12, 0, 0),
+    Size                   = UDim2.new(1, -110, 1, 0),
+    Font                   = Enum.Font.Gotham,
+    PlaceholderText        = "waypoint name…",
+    PlaceholderColor3      = Theme.TextMuted,
+    Text                   = "",
+    TextColor3             = Theme.Text,
+    TextSize               = 13,
+    TextXAlignment         = Enum.TextXAlignment.Left,
+    ClearTextOnFocus       = false,
+    Parent                 = wpInputCard,
+}) :: TextBox
+local wpSaveBtn = new("TextButton", {
+    BackgroundColor3       = Theme.Accent,
+    BackgroundTransparency = 0.05,
+    BorderSizePixel        = 0,
+    AnchorPoint            = Vector2.new(1, 0.5),
+    Position               = UDim2.new(1, -6, 0.5, 0),
+    Size                   = UDim2.fromOffset(86, 28),
+    Font                   = Enum.Font.GothamBold,
+    Text                   = "SAVE",
+    TextColor3             = Color3.fromRGB(255, 255, 255),
+    TextSize               = 12,
+    AutoButtonColor        = false,
+    Parent                 = wpInputCard,
+}, { new("UICorner", { CornerRadius = UDim.new(0, 8) }) }) :: TextButton
+follow(wpSaveBtn)
+
+header(waypointsPage, "Saved")
+local wpListBox = glassSurface({
+    BackgroundColor3       = Theme.Bg3,
+    BackgroundTransparency = 0.2,
+    Size                   = UDim2.new(1, 0, 0, 280),
+    Parent                 = waypointsPage,
+    Radius                 = 10,
+})
+local wpScroll = new("ScrollingFrame", {
+    BackgroundTransparency = 1,
+    Size                   = UDim2.fromScale(1, 1),
+    BorderSizePixel        = 0,
+    CanvasSize             = UDim2.new(),
+    AutomaticCanvasSize    = Enum.AutomaticSize.Y,
+    ScrollBarThickness     = 3,
+    ScrollBarImageColor3   = Theme.Accent,
+    Parent                 = wpListBox,
+}, {
+    new("UIListLayout", { Padding = UDim.new(0, 4) }),
+    new("UIPadding", {
+        PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
+        PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6),
+    }),
+}) :: ScrollingFrame
+
+local function refreshWaypoints()
+    for _, c in ipairs(wpScroll:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    local names = {}
+    for n in pairs(State.waypoints) do table.insert(names, n) end
+    table.sort(names)
+    for _, name in ipairs(names) do
+        local wp = State.waypoints[name]
+        local row = new("Frame", {
+            BackgroundColor3       = Theme.Bg2,
+            BackgroundTransparency = 0.2,
+            BorderSizePixel        = 0,
+            Size                   = UDim2.new(1, 0, 0, 34),
+            Parent                 = wpScroll,
+        }, {
+            new("UICorner", { CornerRadius = UDim.new(0, 8) }),
+            new("UIStroke", { Color = Theme.BorderSoft, Transparency = 0.5 }),
+        }) :: Frame
+
+        new("TextLabel", {
+            BackgroundTransparency = 1,
+            Position               = UDim2.new(0, 12, 0, 0),
+            Size                   = UDim2.new(1, -120, 0, 18),
+            Font                   = Enum.Font.GothamMedium,
+            Text                   = name,
+            TextColor3             = Theme.Text,
+            TextSize               = 13,
+            TextXAlignment         = Enum.TextXAlignment.Left,
+            Parent                 = row,
+        })
+        new("TextLabel", {
+            BackgroundTransparency = 1,
+            Position               = UDim2.new(0, 12, 0, 18),
+            Size                   = UDim2.new(1, -120, 0, 14),
+            Font                   = Enum.Font.Code,
+            Text                   = ("%d, %d, %d"):format(wp.x, wp.y, wp.z),
+            TextColor3             = Theme.TextDim,
+            TextSize               = 11,
+            TextXAlignment         = Enum.TextXAlignment.Left,
+            Parent                 = row,
+        })
+
+        local tpBtn = new("TextButton", {
+            BackgroundColor3       = Theme.Accent,
+            BorderSizePixel        = 0,
+            AnchorPoint            = Vector2.new(1, 0.5),
+            Position               = UDim2.new(1, -54, 0.5, 0),
+            Size                   = UDim2.fromOffset(44, 22),
+            Font                   = Enum.Font.GothamBold,
+            Text                   = "GO",
+            TextColor3             = Color3.fromRGB(255, 255, 255),
+            TextSize               = 11,
+            AutoButtonColor        = false,
+            Parent                 = row,
+        }, { new("UICorner", { CornerRadius = UDim.new(0, 6) }) }) :: TextButton
+        follow(tpBtn)
+        tpBtn.MouseButton1Click:Connect(function() teleportWaypoint(name) end)
+
+        local delBtn = new("TextButton", {
+            BackgroundColor3       = Theme.Err,
+            BorderSizePixel        = 0,
+            AnchorPoint            = Vector2.new(1, 0.5),
+            Position               = UDim2.new(1, -6, 0.5, 0),
+            Size                   = UDim2.fromOffset(44, 22),
+            Font                   = Enum.Font.GothamBold,
+            Text                   = "DEL",
+            TextColor3             = Color3.fromRGB(255, 255, 255),
+            TextSize               = 11,
+            AutoButtonColor        = false,
+            Parent                 = row,
+        }, { new("UICorner", { CornerRadius = UDim.new(0, 6) }) }) :: TextButton
+        delBtn.MouseButton1Click:Connect(function()
+            deleteWaypoint(name); refreshWaypoints(); saveConfig()
+        end)
+    end
+end
+
+wpSaveBtn.MouseButton1Click:Connect(function()
+    saveWaypoint(wpNameInput.Text)
+    wpNameInput.Text = ""
+    refreshWaypoints(); saveConfig()
+end)
+refreshWaypoints()
+
+-- ── SERVER
+local serverPage = makeTab("server", "⌬", "Server")
+header(serverPage, "Utility")
+Toggle(serverPage, "Anti-AFK",       function(v) setAntiAFK(v); pushLog("antiafk " .. tostring(v)); saveConfig() end)
+Toggle(serverPage, "Auto-Respawn",   function(v) setAutoRespawn(v); pushLog("autorespawn " .. tostring(v)); saveConfig() end)
+Button(serverPage, "Rejoin Server",   function() notify("Rejoining…",   "info"); rejoinServer() end)
+Button(serverPage, "Server Hop",      function() notify("Searching servers…", "info"); serverHop() end)
+Button(serverPage, "Copy Job ID",     function()
+    if typeof(rawget(getfenv(), "setclipboard")) == "function" then
+        pcall((rawget(getfenv(), "setclipboard") :: any), game.JobId)
+        notify("Job ID copied", "ok")
+    else
+        notify("Clipboard not supported here", "warn")
+    end
+end)
+
+header(serverPage, "Info")
+local serverInfo = new("TextLabel", {
+    BackgroundColor3       = Theme.Bg3,
+    BackgroundTransparency = 0.2,
+    BorderSizePixel        = 0,
+    Size                   = UDim2.new(1, 0, 0, 120),
+    Font                   = Enum.Font.Code,
+    Text                   = "",
+    TextColor3             = Theme.Text,
+    TextSize               = 12,
+    TextXAlignment         = Enum.TextXAlignment.Left,
+    TextYAlignment         = Enum.TextYAlignment.Top,
+    Parent                 = serverPage,
+}, {
+    new("UICorner",  { CornerRadius = UDim.new(0, 10) }),
+    new("UIPadding", {
+        PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12),
+        PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14),
+    }),
+}) :: TextLabel
+
+local serverStart = os.clock()
+local function refreshServerInfo()
+    if not serverPage.Visible then return end
+    local up   = math.floor(os.clock() - serverStart)
+    local h, m, s = math.floor(up / 3600), math.floor((up % 3600) / 60), up % 60
+    serverInfo.Text = string.format([[
+PlaceId     %d
+JobId       %s
+Players     %d / %d
+LocalPlayer %s (id %d)
+Ping        %d ms
+Uptime      %02d:%02d:%02d]],
+        game.PlaceId,
+        game.JobId == "" and "(Studio)" or game.JobId,
+        #Players:GetPlayers(), Players.MaxPlayers,
+        LocalPlayer.DisplayName, LocalPlayer.UserId,
+        math.floor(LocalPlayer:GetNetworkPing() * 1000),
+        h, m, s)
+end
+task.spawn(function()
+    while serverInfo.Parent do
+        refreshServerInfo()
+        task.wait(1)
+    end
+end)
 
 -- ── LOGS
 local logPage = makeTab("logs", "≡", "Logs")
@@ -1938,6 +2520,7 @@ Toggle(infoPage, "Backdrop Blur", function(v)
     if v then setBackdropBlur(true) else
         if panelBlur then panelBlur:Destroy(); panelBlur = nil end
     end
+    saveConfig()
 end)
 Toggle(infoPage, "RGB Accent Cycle", function(v)
     CONFIG.RGBCycle = v
@@ -1950,7 +2533,42 @@ Toggle(infoPage, "RGB Accent Cycle", function(v)
     else
         applyAccent(Theme.Accent)
     end
+    saveConfig()
 end)
+
+header(infoPage, "Theme Preset")
+local themeRow = new("Frame", {
+    BackgroundTransparency = 1,
+    Size                   = UDim2.new(1, 0, 0, 72),
+    Parent                 = infoPage,
+}, {
+    new("UIGridLayout", {
+        CellSize        = UDim2.fromOffset(96, 32),
+        CellPadding     = UDim2.fromOffset(6, 6),
+        SortOrder       = Enum.SortOrder.LayoutOrder,
+        FillDirection   = Enum.FillDirection.Horizontal,
+        StartCorner     = Enum.StartCorner.TopLeft,
+    }),
+}) :: Frame
+for name, preset in pairs(ThemePresets) do
+    local swatch = new("TextButton", {
+        BackgroundColor3       = preset.Accent,
+        BackgroundTransparency = 0.05,
+        BorderSizePixel        = 0,
+        Font                   = Enum.Font.GothamBold,
+        Text                   = name,
+        TextColor3             = Color3.fromRGB(255, 255, 255),
+        TextSize               = 12,
+        AutoButtonColor        = false,
+        Parent                 = themeRow,
+    }, {
+        new("UICorner", { CornerRadius = UDim.new(0, 8) }),
+        new("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Transparency = 0.7 }),
+    }) :: TextButton
+    swatch.MouseButton1Click:Connect(function()
+        applyTheme(name); notify("Theme → " .. name, "ok"); saveConfig()
+    end)
+end
 
 header(infoPage, "Commands")
 infoBlock(infoPage, [[
@@ -1960,6 +2578,7 @@ ws / walkspeed <n>        set walkspeed
 jp / jumppower <n>        set jump power
 infjump                   toggle infinite jump
 invis                     toggle local invisibility
+hitbox [size]             toggle hitbox extender
 reset / sit               utilities
 tp <player>               teleport to player
 bring <player>            bring player
@@ -1970,7 +2589,15 @@ fov <n> / gravity <n>
 day / night
 esp / tracers / fb        toggle visuals
 vspeed <n>                vehicle speed multiplier
-vboost / vfly             vehicle commands]], 280, Enum.Font.Code)
+vboost / vfly             vehicle commands
+freecam / clicktp / hud   camera tools
+wp <name>                 save waypoint at current position
+goto <name>               teleport to waypoint
+wpdel <name>              delete waypoint
+antiafk / autorespawn     server utility toggles
+rejoin / hop              rejoin / server-hop
+theme <name>              switch theme (Midnight/Cyber/Sunset/…)
+save / load               persist or reload config]], 380, Enum.Font.Code)
 
 -- Wire tab buttons
 for id, t in pairs(tabs) do
@@ -2023,6 +2650,30 @@ local function runCommand(raw: string)
     elseif cmd == "vboost"     then vehicleBoost()
     elseif cmd == "vfly"       then setVehicleFly(not State.vFly)
     elseif cmd == "vspeed"     then State.vSpeedMult = num(1); applyVehicleTuning()
+    elseif cmd == "freecam"    then setFreecam(not State.freecam)
+    elseif cmd == "unfreecam"  then setFreecam(false)
+    elseif cmd == "clicktp"    then setClickTP(not State.clickTP)
+    elseif cmd == "hud"        then setCoordHUD(not State.coordHUD)
+    elseif cmd == "antiafk"    then setAntiAFK(not State.antiAFK); saveConfig()
+    elseif cmd == "autorespawn" then setAutoRespawn(not State.autoRespawn); saveConfig()
+    elseif cmd == "rejoin"     then rejoinServer()
+    elseif cmd == "hop"        then serverHop()
+    elseif cmd == "hitbox"     then
+        if parts[2] then State.hitboxSize = tonumber(parts[2]) or State.hitboxSize end
+        setHitbox(not State.hitbox)
+    elseif cmd == "wp"         then
+        local name = parts[2]; if name then saveWaypoint(name); refreshWaypoints(); saveConfig() else notify("Usage: wp <name>", "warn") end
+    elseif cmd == "goto"       then
+        local name = parts[2]; if name then teleportWaypoint(name) else notify("Usage: goto <name>", "warn") end
+    elseif cmd == "wpdel"      then
+        local name = parts[2]; if name then deleteWaypoint(name); refreshWaypoints(); saveConfig() end
+    elseif cmd == "specnext"   then cycleSpectate(1)
+    elseif cmd == "specprev"   then cycleSpectate(-1)
+    elseif cmd == "theme"      then
+        if parts[2] and ThemePresets[parts[2]] then applyTheme(parts[2]); saveConfig(); notify("Theme → " .. parts[2], "ok")
+        else notify("Themes: Midnight, Cyber, Sunset, Mint, Crimson, Royal", "info") end
+    elseif cmd == "save"       then saveConfig(); notify("Config saved", "ok")
+    elseif cmd == "load"       then loadConfig(); applyTheme(State.themeName); refreshWaypoints(); notify("Config reloaded", "ok")
     elseif cmd == "help"       then selectTab("info")
     elseif cmd == "clear"      then table.clear(Log); refreshLogs()
     else notify("Unknown command: " .. cmd, "err"); return
@@ -2258,12 +2909,14 @@ LocalPlayer.CharacterAdded:Connect(function(c)
     if State.noclip      then setNoclip(true) end
     if State.walkSpeedOn then applyWalkSpeed() end
     if State.jumpPowerOn then applyJumpPower() end
-    if State.invisible then
-        -- Maids.invis loop survives respawn; nothing to do.
-    end
+    -- invisible/hitbox loops survive respawn and pick up the new character
+    if State.hitbox      then applyHitbox() end
     if State.spectating and State.spectating.Parent then setSpectate(State.spectating) end
 end)
-LocalPlayer.CharacterRemoving:Connect(function() Maids.fly:clean() end)
+LocalPlayer.CharacterRemoving:Connect(function()
+    Maids.fly:clean()
+    hitboxBackup = nil
+end)
 
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     Camera = Workspace.CurrentCamera
@@ -2273,8 +2926,22 @@ end)
 -- ╔══════════════════════════════════════════════════════════════════════╗
 -- ║  BOOT                                                                 ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
+-- Load persisted settings before doing first paint of accent / waypoints
+safe(loadConfig)
+applyTheme(State.themeName)
+refreshWaypoints()
+
+if State.antiAFK     then setAntiAFK(true) end
+if State.autoRespawn then setAutoRespawn(true) end
+
 applyFOV()
 applyGravity()
-applyAccent(Theme.Accent)
 trackPanel()
-notify(("Admin Panel ready — press %s"):format(CONFIG.ToggleKey.Name), "ok")
+
+-- Save config on game close where supported
+if game:GetService("Players").LocalPlayer then
+    game:BindToClose(function() pcall(saveConfig) end)
+end
+
+local persisted = hasFileAPI() and " · settings auto-saved" or ""
+notify(("Admin Panel ready — press %s%s"):format(CONFIG.ToggleKey.Name, persisted), "ok")
