@@ -228,7 +228,7 @@ local State = {
     jumpPower   = 50,    jumpPowerOn = false,
     infJump     = false,
 
-    invisible   = false, godMode    = false,
+    invisible   = false,
     spectating  = nil :: Player?,
     target      = nil :: Player?,
 
@@ -241,7 +241,7 @@ local State = {
 
 local Maids = {
     fly = Maid.new(), noclip = Maid.new(), infJump = Maid.new(),
-    god = Maid.new(), vfly = Maid.new(), tracers = Maid.new(), rgb = Maid.new(),
+    invis = Maid.new(), vfly = Maid.new(), tracers = Maid.new(), rgb = Maid.new(),
 }
 
 local Log: { string } = {}
@@ -487,7 +487,8 @@ end
 -- ║  FEATURE LOGIC                                                        ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 
--- ── Fly (LinearVelocity + AlignOrientation, modern API)
+-- ── Fly  ──  HD Admin–style: upright avatar, camera-yaw facing,
+-- smooth lerped velocity. LeftShift acts as a sprint multiplier.
 local function startFly()
     local root = hrp()
     local hum  = humanoid()
@@ -495,35 +496,65 @@ local function startFly()
 
     local att = new("Attachment", { Name = "AdminFlyAtt", Parent = root }) :: Attachment
     local lv  = new("LinearVelocity", {
+        Name           = "AdminFlyLV",
         Attachment0    = att,
         MaxForce       = math.huge,
         VectorVelocity = Vector3.zero,
+        RelativeTo     = Enum.ActuatorRelativeTo.World,
         Parent         = root,
     }) :: LinearVelocity
     local ao  = new("AlignOrientation", {
+        Name           = "AdminFlyAO",
         Attachment0    = att,
         Mode           = Enum.OrientationAlignmentMode.OneAttachment,
-        MaxTorque      = math.huge,
-        Responsiveness = 200,
         AlignType      = Enum.AlignType.AllAxes,
+        MaxTorque      = math.huge,
+        Responsiveness = 90,
         Parent         = root,
     }) :: AlignOrientation
 
     Maids.fly:give(att); Maids.fly:give(lv); Maids.fly:give(ao)
-    hum.PlatformStand = true
-    Maids.fly:give(function() local h = humanoid(); if h then h.PlatformStand = false end end)
 
-    Maids.fly:give(RunService.RenderStepped:Connect(function()
+    -- Hand orientation control to AlignOrientation and let the humanoid
+    -- stop fighting the body movers while flying.
+    local prevAutoRotate = hum.AutoRotate
+    hum.AutoRotate    = false
+    hum.PlatformStand = true
+    Maids.fly:give(function()
+        local h = humanoid()
+        if h then
+            h.PlatformStand = false
+            h.AutoRotate    = prevAutoRotate
+        end
+    end)
+
+    local currentVel = Vector3.zero
+    Maids.fly:give(RunService.RenderStepped:Connect(function(dt: number)
         local cam = Workspace.CurrentCamera
-        local dir = Vector3.zero
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir += cam.CFrame.LookVector  end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir -= cam.CFrame.LookVector  end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir -= cam.CFrame.RightVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir += cam.CFrame.RightVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space)       then dir += Vector3.yAxis end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.yAxis end
-        lv.VectorVelocity = (dir.Magnitude > 0 and dir.Unit or Vector3.zero) * State.flySpeed
-        ao.CFrame         = cam.CFrame
+        -- Camera vectors flattened to the XZ plane → character stays upright.
+        local fwd  = cam.CFrame.LookVector
+        local rgt  = cam.CFrame.RightVector
+        local hFwd = Vector3.new(fwd.X, 0, fwd.Z)
+        local hRgt = Vector3.new(rgt.X, 0, rgt.Z)
+        if hFwd.Magnitude > 0 then hFwd = hFwd.Unit end
+        if hRgt.Magnitude > 0 then hRgt = hRgt.Unit end
+
+        local input = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W)            then input += hFwd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S)            then input -= hFwd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A)            then input -= hRgt end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D)            then input += hRgt end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space)        then input += Vector3.yAxis end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)  then input -= Vector3.yAxis end
+
+        local sprint = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) and 2 or 1
+        local target = (input.Magnitude > 0 and input.Unit or Vector3.zero) * State.flySpeed * sprint
+        currentVel   = currentVel:Lerp(target, math.clamp(dt * 9, 0, 1))
+        lv.VectorVelocity = currentVel
+
+        if hFwd.Magnitude > 0 then
+            ao.CFrame = CFrame.lookAt(Vector3.zero, hFwd)
+        end
     end))
 end
 
@@ -568,34 +599,33 @@ local function setInfJump(on: boolean)
     end))
 end
 
--- ── Status
+-- ── Local invisibility
+-- LocalTransparencyModifier is continuously managed by the camera system
+-- (used for first-person occlusion), so we have to reapply every frame to
+-- keep the character hidden from the local viewport. This hides you from
+-- yourself; other players still see you normally — that's a server-side
+-- effect and is intentionally outside the scope of this client-only panel.
 local function setInvisible(on: boolean)
+    if State.invisible == on then return end
     State.invisible = on
-    local c = char(); if not c then return end
-    for _, d in ipairs(c:GetDescendants()) do
-        if d:IsA("BasePart") then d.LocalTransparencyModifier = on and 1 or 0
-        elseif d:IsA("Decal") then d.Transparency             = on and 1 or 0 end
+    Maids.invis:clean()
+    if not on then
+        local c = char(); if not c then return end
+        for _, d in ipairs(c:GetDescendants()) do
+            if d:IsA("BasePart") then d.LocalTransparencyModifier = 0
+            elseif d:IsA("Decal") then d.Transparency             = 0 end
+        end
+        return
     end
+    Maids.invis:give(RunService.RenderStepped:Connect(function()
+        local c = char(); if not c then return end
+        for _, d in ipairs(c:GetDescendants()) do
+            if d:IsA("BasePart") then d.LocalTransparencyModifier = 1
+            elseif d:IsA("Decal") then d.Transparency             = 1 end
+        end
+    end))
 end
 
-local function setGodMode(on: boolean)
-    if State.godMode == on then return end
-    State.godMode = on
-    Maids.god:clean()
-    local h = humanoid(); if not h then return end
-    if on then
-        h.MaxHealth = math.huge
-        h.Health    = math.huge
-        Maids.god:give(h.HealthChanged:Connect(function(hp)
-            if h.Parent and hp < h.MaxHealth then h.Health = h.MaxHealth end
-        end))
-    else
-        h.MaxHealth = 100
-        h.Health    = 100
-    end
-end
-
-local function heal()      local h = humanoid(); if h then h.Health = h.MaxHealth end end
 local function resetChar() local h = humanoid(); if h then h.Health = 0 end end
 local function sitNow()    local h = humanoid(); if h then h.Sit = true end end
 
@@ -1556,9 +1586,7 @@ Slider(selfPage, "Jump Power", 50, 500, State.jumpPower, 5, function(v)
 end)
 
 header(selfPage, "Status")
-Toggle(selfPage, "Invisible", function(v) setInvisible(v); pushLog("invis " .. tostring(v)) end)
-Toggle(selfPage, "God Mode",  function(v) setGodMode(v);  pushLog("god "   .. tostring(v)) end)
-Button(selfPage, "Heal",            function() heal();      notify("Healed", "ok") end)
+Toggle(selfPage, "Invisible (local view)", function(v) setInvisible(v); pushLog("invis " .. tostring(v)) end)
 Button(selfPage, "Reset Character", function() resetChar(); notify("Reset", "info") end)
 Button(selfPage, "Sit",             function() sitNow() end)
 
@@ -1926,13 +1954,13 @@ end)
 
 header(infoPage, "Commands")
 infoBlock(infoPage, [[
-fly                       toggle flight
+fly                       toggle flight (WASD + Space/Ctrl, Shift = sprint)
 noclip                    toggle noclip
 ws / walkspeed <n>        set walkspeed
 jp / jumppower <n>        set jump power
 infjump                   toggle infinite jump
-invis / god               toggle status
-heal / reset / sit        utilities
+invis                     toggle local invisibility
+reset / sit               utilities
 tp <player>               teleport to player
 bring <player>            bring player
 spec <player> | spec off  spectate
@@ -1975,9 +2003,6 @@ local function runCommand(raw: string)
     elseif cmd == "infjump"    then setInfJump(not State.infJump)
     elseif cmd == "invis"      then setInvisible(not State.invisible)
     elseif cmd == "vis"        then setInvisible(false)
-    elseif cmd == "god"        then setGodMode(not State.godMode)
-    elseif cmd == "ungod"      then setGodMode(false)
-    elseif cmd == "heal"       then heal()
     elseif cmd == "reset" or cmd == "re" then resetChar()
     elseif cmd == "sit"        then sitNow()
     elseif cmd == "tp"         then local t = p(); if t then teleportTo(t)        else notify("Player not found", "warn") end
@@ -2233,8 +2258,9 @@ LocalPlayer.CharacterAdded:Connect(function(c)
     if State.noclip      then setNoclip(true) end
     if State.walkSpeedOn then applyWalkSpeed() end
     if State.jumpPowerOn then applyJumpPower() end
-    if State.invisible   then setInvisible(true) end
-    if State.godMode     then Maids.god:clean(); State.godMode = false; setGodMode(true) end
+    if State.invisible then
+        -- Maids.invis loop survives respawn; nothing to do.
+    end
     if State.spectating and State.spectating.Parent then setSpectate(State.spectating) end
 end)
 LocalPlayer.CharacterRemoving:Connect(function() Maids.fly:clean() end)
