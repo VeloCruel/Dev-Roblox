@@ -13,13 +13,35 @@ generated automatically.
 
 ## Quick start
 
-1. Open [`AdminPanel.lua`](./AdminPanel.lua) and edit the `CONFIG` block at
-   the top — set `Owner` to your username (or leave blank to allow whoever
-   runs the script).
+`AdminPanel.lua` is **one file that runs in two contexts**. It detects
+where it's running via `RunService:IsServer()` and behaves accordingly.
+
+### Client only (no server features)
+
+1. Open [`AdminPanel.lua`](./AdminPanel.lua) and edit the `CONFIG` block —
+   set `Owner` to your username (it ships locked to `"Chikasid"`).
 2. Drop the file into `StarterPlayer > StarterPlayerScripts` as a
-   LocalScript, or execute it through your executor of choice.
+   **LocalScript**, or execute it through your executor of choice.
 3. Press **Right Control** (configurable) — or tap the floating button on
    mobile — to open the panel.
+
+The Admin tab (`godmode` / `kill all` / `kick` / mass actions) stays
+hidden because there's no server companion.
+
+### With server-authoritative tooling
+
+Place the **same file** in **two locations** in your place:
+
+| Location | Class |
+| --- | --- |
+| `ServerScriptService` | **Script** |
+| `StarterPlayer > StarterPlayerScripts` | **LocalScript** |
+
+On the server, the script registers `ReplicatedStorage.AdminPanelRemotes`
+with a single `RemoteEvent` and handles each action only when the firing
+player matches `CONFIG.Owner`. On the client, the panel detects the
+companion folder and unlocks the **Admin** tab, plus enables commands
+like `god`, `kill <player>`, `killall`, `bringall`, `kick`, etc.
 
 ### One-line loader (for executors)
 
