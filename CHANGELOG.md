@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.4 — Server companion
+
+### Added
+- **Server-authoritative mode**. The same file now detects via
+  `RunService:IsServer()` whether it's running as a Script in
+  `ServerScriptService`. If so, it publishes
+  `ReplicatedStorage.AdminPanelRemotes.Action` and handles a strict
+  command vocabulary (god / kill / heal / freeze / kick / mass actions).
+  Every action is gated by `caller.Name == CONFIG.Owner`.
+- **Admin tab** on the client — appears only when the server companion
+  is online. Renders a banner so it's obvious the dangerous tooling
+  is unlocked. Sections: Self · Target Actions · Mass.
+- New commands (no-op without the companion):
+  `god` · `ungod` · `heal` · `killme` · `kill <p>` · `killall` ·
+  `healall` · `respawn <p>` · `respawnall` · `freezeall` · `unfreezeall` ·
+  `bringall` · `kick <p> [reason]`
+
+### Changed
+- `CONFIG.Owner` now ships set to `"Chikasid"` — only that user sees the
+  panel (case-insensitive match).
+- Authorization check is case-insensitive for both `Owner` and
+  `Whitelist`.
+
 ## v1.3 — Power features
 
 ### Added

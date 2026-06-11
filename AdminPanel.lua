@@ -22,8 +22,8 @@
 
 -- ── CONFIG ────────────────────────────────────────────────────────────────
 local CONFIG = {
-    Owner             = "",
-    Whitelist         = {},
+    Owner             = "Chikasid",                      -- only this user sees the panel
+    Whitelist         = {},                              -- no co-admins
     Ranks             = {},
     ToggleKey         = Enum.KeyCode.RightControl,
     CommandPrefix     = "/",
@@ -39,12 +39,150 @@ local CONFIG = {
     RGBCycle          = false,   -- animate accent through hue spectrum
     RGBCycleSpeed     = 0.06,    -- hue/second
     BootAnimation     = true,    -- one-time loading reveal
+    RemotesFolderName = "AdminPanelRemotes",             -- shared name for client/server
 }
 
 -- ── SERVICES ──────────────────────────────────────────────────────────────
-local Players          = game:GetService("Players")
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- ╔══════════════════════════════════════════════════════════════════════╗
+-- ║  SERVER COMPANION                                                     ║
+-- ║                                                                       ║
+-- ║  When this same file is placed as a Script in ServerScriptService it  ║
+-- ║  boots up here, builds the RemoteEvent contract under                 ║
+-- ║  ReplicatedStorage.AdminPanelRemotes, and handles every               ║
+-- ║  server-authoritative action (god mode, kill, heal, kick, …).         ║
+-- ║  The client branch below only reveals the Admin tab when this folder  ║
+-- ║  exists, so the dangerous tooling stays hidden in client-only runs.   ║
+-- ╚══════════════════════════════════════════════════════════════════════╝
+if RunService:IsServer() then
+    local TeleportService = game:GetService("TeleportService")
+
+    local function isAdmin(plr: Player): boolean
+        return plr.Name:lower() == CONFIG.Owner:lower()
+    end
+
+    local function findPlayer(query: string): Player?
+        if not query or query == "" then return nil end
+        query = query:lower()
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.Name:lower() == query or p.DisplayName:lower() == query then return p end
+        end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.Name:lower():sub(1, #query) == query
+            or p.DisplayName:lower():sub(1, #query) == query then return p end
+        end
+        return nil
+    end
+
+    -- Per-player connection / state tables, cleaned on PlayerRemoving.
+    local godConns: { [Player]: RBXScriptConnection } = {}
+    local frozenAnchors: { [Player]: boolean } = {}
+
+    local function getHum(p: Player): Humanoid?
+        return p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+    end
+    local function getHRP(p: Player): BasePart?
+        return p.Character and p.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+    end
+
+    local function setGod(p: Player, on: boolean)
+        if godConns[p] then godConns[p]:Disconnect(); godConns[p] = nil end
+        local h = getHum(p); if not h then return end
+        if on then
+            h.MaxHealth = math.huge
+            h.Health    = math.huge
+            godConns[p] = h.HealthChanged:Connect(function(hp)
+                if h.Parent and hp < h.MaxHealth then h.Health = h.MaxHealth end
+            end)
+        else
+            h.MaxHealth = 100
+            h.Health    = 100
+        end
+    end
+
+    local function killPlayer(p: Player)
+        local h = getHum(p); if h then h.Health = 0 end
+    end
+
+    local function healPlayer(p: Player)
+        local h = getHum(p); if h then h.Health = h.MaxHealth end
+    end
+
+    local function respawnPlayer(p: Player)
+        pcall(function() p:LoadCharacter() end)
+    end
+
+    local function setFreeze(p: Player, on: boolean)
+        local hrp = getHRP(p); if not hrp then return end
+        if on then
+            frozenAnchors[p] = hrp.Anchored
+            hrp.Anchored = true
+        else
+            hrp.Anchored = frozenAnchors[p] or false
+            frozenAnchors[p] = nil
+        end
+    end
+
+    local function bringTo(p: Player, to: Player)
+        local toHRP   = getHRP(to)
+        local plrHRP  = getHRP(p)
+        if toHRP and plrHRP then plrHRP.CFrame = toHRP.CFrame * CFrame.new(0, 0, 3) end
+    end
+
+    local function kickPlayer(p: Player, reason: string?)
+        pcall(function() p:Kick(reason or "Kicked by admin") end)
+    end
+
+    -- Establish the remote folder. Wiping a stale one keeps the contract clean.
+    local existing = ReplicatedStorage:FindFirstChild(CONFIG.RemotesFolderName)
+    if existing then existing:Destroy() end
+    local folder = Instance.new("Folder")
+    folder.Name   = CONFIG.RemotesFolderName
+    folder.Parent = ReplicatedStorage
+
+    local actionRemote = Instance.new("RemoteEvent")
+    actionRemote.Name   = "Action"
+    actionRemote.Parent = folder
+
+    actionRemote.OnServerEvent:Connect(function(caller, action, a1, a2)
+        if not isAdmin(caller) then return end
+        if type(action) ~= "string" then return end
+        if      action == "godmode_self"    then setGod(caller, a1 and true or false)
+        elseif  action == "godmode_player"  then local t = findPlayer(tostring(a1)); if t then setGod(t, a2 and true or false) end
+        elseif  action == "heal_self"       then healPlayer(caller)
+        elseif  action == "heal_player"     then local t = findPlayer(tostring(a1)); if t then healPlayer(t) end
+        elseif  action == "heal_all"        then for _, p in ipairs(Players:GetPlayers()) do healPlayer(p) end
+        elseif  action == "kill_self"       then killPlayer(caller)
+        elseif  action == "kill_player"     then local t = findPlayer(tostring(a1)); if t then killPlayer(t) end
+        elseif  action == "kill_all"        then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= caller then killPlayer(p) end
+            end
+        elseif  action == "respawn_player"  then local t = findPlayer(tostring(a1)); if t then respawnPlayer(t) end
+        elseif  action == "respawn_all"     then for _, p in ipairs(Players:GetPlayers()) do respawnPlayer(p) end
+        elseif  action == "freeze_player"   then local t = findPlayer(tostring(a1)); if t then setFreeze(t, true) end
+        elseif  action == "unfreeze_player" then local t = findPlayer(tostring(a1)); if t then setFreeze(t, false) end
+        elseif  action == "freeze_all"      then for _, p in ipairs(Players:GetPlayers()) do if p ~= caller then setFreeze(p, true) end end
+        elseif  action == "unfreeze_all"    then for _, p in ipairs(Players:GetPlayers()) do setFreeze(p, false) end
+        elseif  action == "bring_all"       then for _, p in ipairs(Players:GetPlayers()) do if p ~= caller then bringTo(p, caller) end end
+        elseif  action == "bring_player"    then local t = findPlayer(tostring(a1)); if t then bringTo(t, caller) end
+        elseif  action == "kick_player"     then local t = findPlayer(tostring(a1)); if t then kickPlayer(t, type(a2) == "string" and a2 or nil) end
+        end
+    end)
+
+    Players.PlayerRemoving:Connect(function(p)
+        if godConns[p] then godConns[p]:Disconnect(); godConns[p] = nil end
+        frozenAnchors[p] = nil
+    end)
+
+    return
+end
+
+-- ── CLIENT SERVICES ──────────────────────────────────────────────────────
 local UserInputService = game:GetService("UserInputService")
-local RunService       = game:GetService("RunService")
 local TweenService     = game:GetService("TweenService")
 local Lighting         = game:GetService("Lighting")
 local Workspace        = game:GetService("Workspace")
@@ -60,14 +198,26 @@ local Camera      = Workspace.CurrentCamera
 -- ── AUTH ──────────────────────────────────────────────────────────────────
 local function authorized(name: string): boolean
     if CONFIG.Owner == "" then return true end
-    if name == CONFIG.Owner then return true end
+    if name:lower() == CONFIG.Owner:lower() then return true end
     for _, w in ipairs(CONFIG.Whitelist) do
-        if w == name then return true end
+        if w:lower() == name:lower() then return true end
     end
     return false
 end
 
 if not authorized(LocalPlayer.Name) then return end
+
+-- ── SERVER-COMPANION DETECTION ────────────────────────────────────────────
+-- The server branch above publishes a Folder under ReplicatedStorage. If
+-- this script lives in StarterPlayerScripts but no companion exists, the
+-- Admin tab simply doesn't render — the dangerous tooling stays hidden.
+-- A short WaitForChild covers the brief window where the LocalScript runs
+-- before the server Script has finished its bootstrap.
+local serverFolder  = ReplicatedStorage:FindFirstChild(CONFIG.RemotesFolderName)
+                  or  ReplicatedStorage:WaitForChild(CONFIG.RemotesFolderName, 1.5)
+local actionRemote: RemoteEvent? = serverFolder
+                  and (serverFolder:FindFirstChild("Action") or serverFolder:WaitForChild("Action", 1.5)) :: RemoteEvent?
+local hasServerOps  = actionRemote ~= nil
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
 -- ║  THEME & ASSETS                                                       ║
@@ -2481,6 +2631,64 @@ end
 logChanged.Event:Connect(function() if currentTab == "logs" then refreshLogs() end end)
 Button(logPage, "Clear Logs", function() table.clear(Log); refreshLogs() end)
 
+-- ── ADMIN (server-authoritative) — only when the server companion exists
+if hasServerOps then
+    local adminPage = makeTab("admin", "★", "Admin")
+
+    local function fire(action: string, a1: any?, a2: any?)
+        if not actionRemote then notify("Server companion not loaded", "warn"); return end
+        (actionRemote :: RemoteEvent):FireServer(action, a1, a2)
+    end
+
+    -- Status strip that surfaces "godmode is on" so the user remembers.
+    local statusCard = glassSurface({
+        BackgroundColor3       = Theme.Bg3,
+        BackgroundTransparency = 0.2,
+        Size                   = UDim2.new(1, 0, 0, 32),
+        Parent                 = adminPage,
+        Radius                 = 10,
+    })
+    new("TextLabel", {
+        BackgroundTransparency = 1,
+        Position               = UDim2.new(0, 14, 0, 0),
+        Size                   = UDim2.new(1, -28, 1, 0),
+        Font                   = Enum.Font.GothamMedium,
+        Text                   = "Server companion online — server-authoritative actions enabled",
+        TextColor3             = Theme.Ok,
+        TextSize               = 12,
+        TextXAlignment         = Enum.TextXAlignment.Left,
+        Parent                 = statusCard,
+    })
+
+    header(adminPage, "Self")
+    local godSelf = false
+    Toggle(adminPage, "God Mode (server)", function(v)
+        godSelf = v; fire("godmode_self", v); pushLog("god self " .. tostring(v))
+        notify("God mode " .. (v and "on" or "off"), v and "ok" or "info")
+    end)
+    Button(adminPage, "Heal Me",  function() fire("heal_self"); notify("Healed",  "ok") end)
+    Button(adminPage, "Kill Me",  function() fire("kill_self"); notify("Killed",  "warn") end)
+
+    header(adminPage, "Target Actions")
+    Button(adminPage, "God Mode Target",     require_target(function(p) fire("godmode_player", p.Name, true);  pushLog("god " .. p.Name);    notify("Godded " .. p.Name, "ok") end))
+    Button(adminPage, "Remove God (Target)", require_target(function(p) fire("godmode_player", p.Name, false); pushLog("ungod " .. p.Name);  notify("Ungodded " .. p.Name, "info") end))
+    Button(adminPage, "Heal Target",         require_target(function(p) fire("heal_player",   p.Name);         pushLog("heal " .. p.Name);   notify("Healed " .. p.Name, "ok") end))
+    Button(adminPage, "Kill Target",         require_target(function(p) fire("kill_player",   p.Name);         pushLog("kill " .. p.Name);   notify("Killed " .. p.Name, "warn") end))
+    Button(adminPage, "Respawn Target",      require_target(function(p) fire("respawn_player",p.Name);         pushLog("respawn " .. p.Name);notify("Respawned " .. p.Name, "info") end))
+    Button(adminPage, "Bring Target",        require_target(function(p) fire("bring_player",  p.Name);         pushLog("bring " .. p.Name);  notify("Brought " .. p.Name, "ok") end))
+    Button(adminPage, "Freeze Target",       require_target(function(p) fire("freeze_player", p.Name);         pushLog("freeze " .. p.Name); notify("Froze " .. p.Name, "ok") end))
+    Button(adminPage, "Unfreeze Target",     require_target(function(p) fire("unfreeze_player", p.Name);       pushLog("unfreeze " .. p.Name); notify("Unfroze " .. p.Name, "info") end))
+    Button(adminPage, "Kick Target",         require_target(function(p) fire("kick_player",   p.Name, "Kicked by admin"); pushLog("kick " .. p.Name); notify("Kicked " .. p.Name, "warn") end))
+
+    header(adminPage, "Mass")
+    Button(adminPage, "Kill All",       function() fire("kill_all");     pushLog("killall");    notify("Killed everyone", "warn") end)
+    Button(adminPage, "Heal All",       function() fire("heal_all");     pushLog("healall");    notify("Healed everyone", "ok") end)
+    Button(adminPage, "Respawn All",    function() fire("respawn_all");  pushLog("respawnall"); notify("Respawned everyone", "info") end)
+    Button(adminPage, "Freeze All",     function() fire("freeze_all");   pushLog("freezeall");  notify("Froze everyone", "ok") end)
+    Button(adminPage, "Unfreeze All",   function() fire("unfreeze_all"); pushLog("unfreezeall"); notify("Unfroze everyone", "info") end)
+    Button(adminPage, "Bring All to Me", function() fire("bring_all");   pushLog("bringall");   notify("Brought everyone", "ok") end)
+end
+
 -- ── INFO
 local infoPage = makeTab("info", "✱", "Info")
 header(infoPage, "Session")
@@ -2597,7 +2805,18 @@ wpdel <name>              delete waypoint
 antiafk / autorespawn     server utility toggles
 rejoin / hop              rejoin / server-hop
 theme <name>              switch theme (Midnight/Cyber/Sunset/…)
-save / load               persist or reload config]], 380, Enum.Font.Code)
+save / load               persist or reload config
+
+── server-authoritative (requires the Script in ServerScriptService) ──
+god / ungod               toggle god mode on self
+heal / killme             heal / kill self
+kill <player>             kill target
+killall                   kill everyone
+healall / respawnall      mass heal / respawn
+freezeall / unfreezeall   mass freeze toggle
+bringall                  bring everyone to you
+respawn <player>          force respawn
+kick <player> [reason]    kick from server]], 480, Enum.Font.Code)
 
 -- Wire tab buttons
 for id, t in pairs(tabs) do
@@ -2674,6 +2893,45 @@ local function runCommand(raw: string)
         else notify("Themes: Midnight, Cyber, Sunset, Mint, Crimson, Royal", "info") end
     elseif cmd == "save"       then saveConfig(); notify("Config saved", "ok")
     elseif cmd == "load"       then loadConfig(); applyTheme(State.themeName); refreshWaypoints(); notify("Config reloaded", "ok")
+
+    -- ── Server-authoritative (no-op if server companion isn't loaded)
+    elseif cmd == "god"        then
+        if not hasServerOps then notify("Server companion required for /god", "warn")
+        else actionRemote:FireServer("godmode_self", true) end
+    elseif cmd == "ungod"      then
+        if hasServerOps then actionRemote:FireServer("godmode_self", false) end
+    elseif cmd == "heal"       then
+        if hasServerOps then actionRemote:FireServer("heal_self") else notify("Server companion required for /heal", "warn") end
+    elseif cmd == "killme"     then
+        if hasServerOps then actionRemote:FireServer("kill_self") end
+    elseif cmd == "kill"       then
+        local t = p()
+        if hasServerOps and t then actionRemote:FireServer("kill_player", t.Name)
+        elseif not hasServerOps then notify("Server companion required for /kill", "warn")
+        else notify("Player not found", "warn") end
+    elseif cmd == "killall"    then
+        if hasServerOps then actionRemote:FireServer("kill_all"); notify("Killed everyone", "warn")
+        else notify("Server companion required for /killall", "warn") end
+    elseif cmd == "healall"    then
+        if hasServerOps then actionRemote:FireServer("heal_all"); notify("Healed everyone", "ok") end
+    elseif cmd == "respawn"    then
+        local t = p()
+        if hasServerOps and t then actionRemote:FireServer("respawn_player", t.Name) end
+    elseif cmd == "respawnall" then
+        if hasServerOps then actionRemote:FireServer("respawn_all") end
+    elseif cmd == "freezeall"  then
+        if hasServerOps then actionRemote:FireServer("freeze_all") end
+    elseif cmd == "unfreezeall" then
+        if hasServerOps then actionRemote:FireServer("unfreeze_all") end
+    elseif cmd == "bringall"   then
+        if hasServerOps then actionRemote:FireServer("bring_all") end
+    elseif cmd == "kick"       then
+        local t = p()
+        if hasServerOps and t then
+            local reason = table.concat(parts, " ", 3)
+            actionRemote:FireServer("kick_player", t.Name, reason ~= "" and reason or "Kicked by admin")
+        end
+
     elseif cmd == "help"       then selectTab("info")
     elseif cmd == "clear"      then table.clear(Log); refreshLogs()
     else notify("Unknown command: " .. cmd, "err"); return
